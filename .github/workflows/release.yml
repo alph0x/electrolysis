@@ -11,25 +11,31 @@ permissions:
 jobs:
   release:
     name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
-            os: macos-latest
           - target: x86_64-apple-darwin
-            os: macos-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build and upload release binary
-        uses: rust-build/rust-build.action@v1.4.5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          RUSTTARGET: ${{ matrix.target }}
-          ARCHIVE_TYPES: tar.gz
-          ARCHIVE_NAME: electrolysis-${{ matrix.target }}.tar.gz
-          UPLOAD_MODE: release
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          tar -czf electrolysis-${{ matrix.target }}.tar.gz \
+            -C target/${{ matrix.target }}/release electrolysis
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: electrolysis-${{ matrix.target }}.tar.gz
