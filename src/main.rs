@@ -272,13 +272,16 @@ fn run_process_single(pbxproj_path: &Path, cli: &Cli) -> Result<()> {
             + sort_stats.pbx_native_targets_sorted
             + sort_stats.pbx_aggregate_targets_sorted
             + sort_stats.pbx_groups_sorted
-            + sort_stats.pbx_target_dependencies_sorted;
+            + sort_stats.pbx_target_dependencies_sorted
+            + sort_stats.xc_remote_package_refs_sorted
+            + sort_stats.xc_package_product_deps_sorted;
         if verbose || any_sorted > 0 {
             eprintln!(
                 "  {} files lists, {} children lists, {} PBX sections, \
                  {} XCBuildConfig, {} PBXVariantGroup, {} XCConfigurationList, \
                  {} PBXNativeTarget, {} PBXAggregateTarget, {} PBXGroup, \
-                 {} PBXTargetDependency sorted; {} duplicate(s) dropped",
+                 {} PBXTargetDependency, {} XCRemoteSwiftPackageRef, \
+                 {} XCSwiftPackageProductDep sorted; {} duplicate(s) dropped",
                 sort_stats.files_lists_sorted,
                 sort_stats.children_lists_sorted,
                 sort_stats.pbx_sections_sorted,
@@ -289,6 +292,8 @@ fn run_process_single(pbxproj_path: &Path, cli: &Cli) -> Result<()> {
                 sort_stats.pbx_aggregate_targets_sorted,
                 sort_stats.pbx_groups_sorted,
                 sort_stats.pbx_target_dependencies_sorted,
+                sort_stats.xc_remote_package_refs_sorted,
+                sort_stats.xc_package_product_deps_sorted,
                 sort_stats.duplicate_entries_removed,
             );
         }

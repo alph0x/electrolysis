@@ -17,6 +17,10 @@
 //! 9. PBXGroup section → sort multi-line entries alphabetically by group name.
 //! 10. PBXTargetDependency section → sort multi-line entries alphabetically by the
 //!     name found in their `target = UUID /* name */` field.
+//! 11. XCRemoteSwiftPackageReference section → sort multi-line entries alphabetically
+//!     by opening-line comment name.
+//! 12. XCSwiftPackageProductDependency section → sort multi-line entries alphabetically
+//!     by opening-line comment name.
 //!
 //! Duplicate entries within any list/section are silently dropped.
 
@@ -85,6 +89,8 @@ pub struct SortStats {
     pub pbx_aggregate_targets_sorted: usize,
     pub pbx_groups_sorted: usize,
     pub pbx_target_dependencies_sorted: usize,
+    pub xc_remote_package_refs_sorted: usize,
+    pub xc_package_product_deps_sorted: usize,
 }
 
 /// Sort a pbxproj text and return (sorted_text, stats).
@@ -105,8 +111,10 @@ pub fn sort(input: &str) -> (String, SortStats) {
     let after_agg_targets    = sort_section_by_comment_name(&after_native_targets, "PBXAggregateTarget", |s| s.pbx_aggregate_targets_sorted += 1, &mut stats);
     let after_groups         = sort_section_by_comment_name(&after_agg_targets, "PBXGroup", |s| s.pbx_groups_sorted += 1, &mut stats);
     let after_target_deps    = sort_pbx_target_dependencies(&after_groups, &mut stats);
+    let after_pkg_refs       = sort_section_by_comment_name(&after_target_deps, "XCRemoteSwiftPackageReference", |s| s.xc_remote_package_refs_sorted += 1, &mut stats);
+    let after_pkg_prod_deps  = sort_section_by_comment_name(&after_pkg_refs, "XCSwiftPackageProductDependency", |s| s.xc_package_product_deps_sorted += 1, &mut stats);
 
-    (after_target_deps, stats)
+    (after_pkg_prod_deps, stats)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

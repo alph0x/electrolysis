@@ -118,6 +118,13 @@ impl<'a> Uniquifier<'a> {
             }
         }
 
+        // SPM package references at the project level.
+        let pkg_refs = self.proj.array_field(root_uuid, "packageReferences").unwrap_or_default();
+        for pkg in &pkg_refs {
+            let pkg = pkg.clone();
+            self.unique_package_ref(root_uuid, &pkg);
+        }
+
         // Pre-register all targets so cross-references resolve.
         let targets = self.proj.array_field(root_uuid, "targets").unwrap_or_default();
         for t in &targets {
@@ -242,6 +249,13 @@ impl<'a> Uniquifier<'a> {
         for rule in rules {
             self.unique_build_rule(target_uuid, &rule);
         }
+
+        // SPM product dependencies.
+        let pkg_deps = self.proj.array_field(target_uuid, "packageProductDependencies").unwrap_or_default();
+        for dep in pkg_deps {
+            let dep = dep.clone();
+            self.unique_package_product_dep(target_uuid, &dep);
+        }
     }
 
     fn unique_target_dependency(&mut self, parent_uuid: &str, dep_uuid: &str) {
@@ -343,21 +357,62 @@ impl<'a> Uniquifier<'a> {
                 return;
             }
         };
-        let file_ref = match obj.get("fileRef").and_then(|v| v.as_str()) {
-            Some(r) => r.to_string(),
+
+        // Regular files use `fileRef`; SPM-generated build files use `productRef`.
+        let ref_uuid = obj
+            .get("fileRef")
+            .or_else(|| obj.get("productRef"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let ref_uuid = match ref_uuid {
+            Some(r) => r,
             None => {
                 self.result.to_remove.insert(bf_uuid.to_string());
                 return;
             }
         };
-        let path_component = if let Some(abs) = self.result.abs_path(&file_ref) {
+
+        let path_component = if let Some(abs) = self.result.abs_path(&ref_uuid) {
             abs.to_string()
         } else {
             self.result.to_remove.insert(bf_uuid.to_string());
-            self.result.to_remove.insert(file_ref);
+            self.result.to_remove.insert(ref_uuid);
             return;
         };
         self.result.set(parent_uuid, bf_uuid, &path_component, "PBXBuildFile");
+    }
+
+    fn unique_package_ref(&mut self, parent_uuid: &str, pkg_uuid: &str) {
+        if self.result.entries.contains_key(pkg_uuid) { return; }
+        if self.proj.get_object(pkg_uuid).is_none() { return; }
+        // Key on repositoryURL so two packages with the same URL share the same UUID.
+        let url = self
+            .proj
+            .str_field(pkg_uuid, "repositoryURL")
+            .unwrap_or(pkg_uuid)
+            .to_string();
+        self.result.set(parent_uuid, pkg_uuid, &url, "XCRemoteSwiftPackageReference");
+    }
+
+    fn unique_package_product_dep(&mut self, parent_uuid: &str, dep_uuid: &str) {
+        if self.result.entries.contains_key(dep_uuid) { return; }
+        if self.proj.get_object(dep_uuid).is_none() { return; }
+        let product_name = self
+            .proj
+            .str_field(dep_uuid, "productName")
+            .unwrap_or(dep_uuid)
+            .to_string();
+        self.result.set(parent_uuid, dep_uuid, &product_name, "XCSwiftPackageProductDependency");
+
+        // Ensure the referenced package is also registered.
+        if let Some(pkg_uuid) = self.proj.str_field(dep_uuid, "package") {
+            let pkg_uuid = pkg_uuid.to_string();
+            if !self.result.entries.contains_key(&pkg_uuid) {
+                let root_uuid = self.proj.root_object.clone();
+                self.unique_package_ref(&root_uuid, &pkg_uuid);
+            }
+        }
     }
 
     fn unique_build_rule(&mut self, parent_uuid: &str, rule_uuid: &str) {
