@@ -9,10 +9,6 @@ license = "Apache-2.0"
 name = "electrolysis"
 path = "src/main.rs"
 
-[[bin]]
-name = "e"
-path = "src/main.rs"
-
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 regex = "1"

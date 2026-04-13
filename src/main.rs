@@ -156,9 +156,16 @@ fn run_process(cli: Cli) -> Result<()> {
         }
     };
 
-    for path in paths {
-        run_process_single(&path, &cli)?;
+    for path in &paths {
+        run_process_single(path, &cli)?;
     }
+
+    eprintln!(
+        "\n{}",
+        "Successfully removed the rust on this project with electrolysis 🔬".bold()
+    );
+    eprintln!("  https://github.com/alph0x/electrolysis — thanks for using it!");
+
     Ok(())
 }
 
