@@ -59,16 +59,16 @@ Download the latest binary from the [Releases](https://github.com/alph0x/electro
 **macOS — Apple Silicon**
 
 ```bash
-curl -L https://github.com/alph0x/electrolysis/releases/latest/download/electrolysis-aarch64-apple-darwin.tar.gz \
-  | tar -xz -C /usr/local/bin
+curl -L https://github.com/alph0x/electrolysis/releases/latest/download/electrolysis-aarch64-apple-darwin.tar.gz | sudo tar -xz -C /usr/local/bin
 ```
 
 **macOS — Intel**
 
 ```bash
-curl -L https://github.com/alph0x/electrolysis/releases/latest/download/electrolysis-x86_64-apple-darwin.tar.gz \
-  | tar -xz -C /usr/local/bin
+curl -L https://github.com/alph0x/electrolysis/releases/latest/download/electrolysis-x86_64-apple-darwin.tar.gz | sudo tar -xz -C /usr/local/bin
 ```
+
+> `sudo` is required to write to `/usr/local/bin`. You will be prompted for your password.
 
 
 ---
