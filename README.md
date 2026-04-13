@@ -52,15 +52,24 @@ cd electrolysis
 cargo install --path .
 ```
 
-### From a release binary (macOS)
+### From a release binary
 
-Download the latest binary from the [Releases](https://github.com/alph0x/electrolysis/releases) page and place it somewhere on your `$PATH`:
+Download the latest binary from the [Releases](https://github.com/alph0x/electrolysis/releases) page and place it somewhere on your `$PATH`.
+
+**macOS — Apple Silicon**
 
 ```bash
-curl -L https://github.com/alph0x/electrolysis/releases/latest/download/electrolysis-aarch64-apple-darwin \
-  -o /usr/local/bin/electrolysis
-chmod +x /usr/local/bin/electrolysis
+curl -L https://github.com/alph0x/electrolysis/releases/latest/download/electrolysis-aarch64-apple-darwin.tar.gz \
+  | tar -xz -C /usr/local/bin
 ```
+
+**macOS — Intel**
+
+```bash
+curl -L https://github.com/alph0x/electrolysis/releases/latest/download/electrolysis-x86_64-apple-darwin.tar.gz \
+  | tar -xz -C /usr/local/bin
+```
+
 
 ---
 
