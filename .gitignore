@@ -1,0 +1,7 @@
+/target
+/releases
+*.xcodeproj.bak/
+
+# Claude
+.claude/
+CONTEXT.md
