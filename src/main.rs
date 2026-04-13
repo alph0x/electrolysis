@@ -263,17 +263,32 @@ fn run_process_single(pbxproj_path: &Path, cli: &Cli) -> Result<()> {
         eprintln!("{}", "→ sorting…".cyan());
         let (sorted, sort_stats) = sorter::sort(&current);
         current = sorted;
-        if verbose
-            || sort_stats.files_lists_sorted
-                + sort_stats.children_lists_sorted
-                + sort_stats.pbx_sections_sorted
-                > 0
-        {
+        let any_sorted = sort_stats.files_lists_sorted
+            + sort_stats.children_lists_sorted
+            + sort_stats.pbx_sections_sorted
+            + sort_stats.xc_build_configs_sorted
+            + sort_stats.pbx_variant_groups_sorted
+            + sort_stats.xc_config_lists_sorted
+            + sort_stats.pbx_native_targets_sorted
+            + sort_stats.pbx_aggregate_targets_sorted
+            + sort_stats.pbx_groups_sorted
+            + sort_stats.pbx_target_dependencies_sorted;
+        if verbose || any_sorted > 0 {
             eprintln!(
-                "  {} files lists, {} children lists, {} PBX sections sorted; {} duplicate(s) dropped",
+                "  {} files lists, {} children lists, {} PBX sections, \
+                 {} XCBuildConfig, {} PBXVariantGroup, {} XCConfigurationList, \
+                 {} PBXNativeTarget, {} PBXAggregateTarget, {} PBXGroup, \
+                 {} PBXTargetDependency sorted; {} duplicate(s) dropped",
                 sort_stats.files_lists_sorted,
                 sort_stats.children_lists_sorted,
                 sort_stats.pbx_sections_sorted,
+                sort_stats.xc_build_configs_sorted,
+                sort_stats.pbx_variant_groups_sorted,
+                sort_stats.xc_config_lists_sorted,
+                sort_stats.pbx_native_targets_sorted,
+                sort_stats.pbx_aggregate_targets_sorted,
+                sort_stats.pbx_groups_sorted,
+                sort_stats.pbx_target_dependencies_sorted,
                 sort_stats.duplicate_entries_removed,
             );
         }
