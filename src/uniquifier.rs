@@ -359,6 +359,7 @@ impl<'a> Uniquifier<'a> {
         };
 
         // Regular files use `fileRef`; SPM-generated build files use `productRef`.
+        let has_product_ref = obj.contains_key("productRef");
         let ref_uuid = obj
             .get("fileRef")
             .or_else(|| obj.get("productRef"))
@@ -373,6 +374,14 @@ impl<'a> Uniquifier<'a> {
             }
         };
 
+        // If this is an SPM product reference and the dependency hasn't been
+        // registered yet, register it now (it may not appear in any
+        // `packageProductDependencies` list when using local packages).
+        if has_product_ref && !self.result.entries.contains_key(&ref_uuid) {
+            let dep_uuid = ref_uuid.clone();
+            self.unique_package_product_dep(parent_uuid, &dep_uuid);
+        }
+
         let path_component = if let Some(abs) = self.result.abs_path(&ref_uuid) {
             abs.to_string()
         } else {
@@ -386,13 +395,15 @@ impl<'a> Uniquifier<'a> {
     fn unique_package_ref(&mut self, parent_uuid: &str, pkg_uuid: &str) {
         if self.result.entries.contains_key(pkg_uuid) { return; }
         if self.proj.get_object(pkg_uuid).is_none() { return; }
-        // Key on repositoryURL so two packages with the same URL share the same UUID.
-        let url = self
+        let isa = self.proj.isa(pkg_uuid).unwrap_or("XCRemoteSwiftPackageReference").to_string();
+        // Remote refs use `repositoryURL`; local refs use `relativePath`.
+        let key = self
             .proj
             .str_field(pkg_uuid, "repositoryURL")
+            .or_else(|| self.proj.str_field(pkg_uuid, "relativePath"))
             .unwrap_or(pkg_uuid)
             .to_string();
-        self.result.set(parent_uuid, pkg_uuid, &url, "XCRemoteSwiftPackageReference");
+        self.result.set(parent_uuid, pkg_uuid, &key, &isa);
     }
 
     fn unique_package_product_dep(&mut self, parent_uuid: &str, dep_uuid: &str) {
