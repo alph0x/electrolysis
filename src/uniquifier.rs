@@ -396,11 +396,23 @@ impl<'a> Uniquifier<'a> {
         if self.result.entries.contains_key(pkg_uuid) { return; }
         if self.proj.get_object(pkg_uuid).is_none() { return; }
         let isa = self.proj.isa(pkg_uuid).unwrap_or("XCRemoteSwiftPackageReference").to_string();
-        // Remote refs use `repositoryURL`; local refs use `relativePath`.
+
+        // Remote package references are kept with their original UUID so that
+        // Xcode does not consider the SPM configuration changed and does not
+        // delete Package.resolved.  Local refs (XCLocalSwiftPackageReference)
+        // are uniquified normally because they are not tracked in Package.resolved.
+        if isa == "XCRemoteSwiftPackageReference" {
+            self.result.entries.insert(
+                pkg_uuid.to_string(),
+                (format!("{}[{}]", isa, pkg_uuid), pkg_uuid.to_string()),
+            );
+            return;
+        }
+
+        // Local refs use `relativePath`.
         let key = self
             .proj
-            .str_field(pkg_uuid, "repositoryURL")
-            .or_else(|| self.proj.str_field(pkg_uuid, "relativePath"))
+            .str_field(pkg_uuid, "relativePath")
             .unwrap_or(pkg_uuid)
             .to_string();
         self.result.set(parent_uuid, pkg_uuid, &key, &isa);
