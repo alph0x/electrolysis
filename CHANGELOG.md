@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.2] - 2026-05-07
+
+### Fixed
+
+- **`PBXProject.attributes.TargetAttributes` preservation** — the dedup pass walks every UUID-keyed `UUID = { … }` line inside `objects = {…}` regardless of nesting depth. When a UUID appears as a *key* of `attributes.TargetAttributes` (signing metadata indexed by target UUID) **and** the same UUID is also the declaration of a top-level `PBXNativeTarget`, the dedup pass treated the inner entry as a duplicate and stripped its body, leaving the wrapper empty. Now bounded by depth: only top-level `objects = {…}` children are deduplicated.
+- **`PBXProject.attributes.TargetAttributes` rehydration** — when the wrapper is fully absent (older electrolysis runs stripped it; modern Xcode 16+ doesn't write it back unless explicit per-target signing is set), electrolysis now adds an empty `TargetAttributes = { };` inside `PBXProject.attributes`. fastlane's `automatic_code_signing` / `update_code_signing_settings` actions auto-populate per-target entries on demand, so an empty wrapper is sufficient and unblocks CI builds that were failing with the misleading `"Seems to be a very old project file format"` error.
+
+### Internal
+
+- New `sanitizer::ensure_pbxproject_target_attributes` (Pass 6) and corresponding `target_attributes_wrapper_added` stat. All paths covered by unit tests; idempotent.
+
 ## [1.4.1] - 2026-05-07
 
 ### Fixed

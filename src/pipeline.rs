@@ -1079,4 +1079,84 @@ mod tests {
         assert!(!names.contains_key("Twin"), "duplicate names must be excluded");
         assert!(names.contains_key("Solo"));
     }
+
+    #[test]
+    fn pipeline_preserves_target_attributes_through_full_run() {
+        // End-to-end regression: PBXProject.attributes.TargetAttributes
+        // entries keyed by PBXNativeTarget UUIDs survive the entire
+        // sanitize → uniquify → sort pipeline.  Fastlane's
+        // `automatic_code_signing` action requires this dict to populate
+        // signing settings; older electrolysis versions stripped its
+        // contents during the dedup pass and broke CI.
+        let pbx = format!(
+            r#"// !$*UTF8*$!
+{{
+    archiveVersion = 1;
+    classes = {{}};
+    objectVersion = 77;
+    objects = {{
+/* Begin PBXNativeTarget section */
+        AAAAAAAAAAAAAAAAAAAAAAAA /* WAPA */ = {{
+            isa = PBXNativeTarget;
+            name = WAPA;
+        }};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+        BBBBBBBBBBBBBBBBBBBBBBBB /* Project object */ = {{
+            isa = PBXProject;
+            attributes = {{
+                BuildIndependentTargetsInParallel = YES;
+                LastUpgradeCheck = 1330;
+                TargetAttributes = {{
+                    AAAAAAAAAAAAAAAAAAAAAAAA = {{
+                        DevelopmentTeam = P78229D8QW;
+                        ProvisioningStyle = Manual;
+                    }};
+                }};
+            }};
+            mainGroup = CCCCCCCCCCCCCCCCCCCCCCCC;
+            targets = (
+                AAAAAAAAAAAAAAAAAAAAAAAA,
+            );
+        }};
+/* End PBXProject section */
+
+/* Begin PBXGroup section */
+        CCCCCCCCCCCCCCCCCCCCCCCC /* root */ = {{
+            isa = PBXGroup;
+            children = ();
+            sourceTree = "<group>";
+        }};
+/* End PBXGroup section */
+    }};
+    rootObject = BBBBBBBBBBBBBBBBBBBBBBBB;
+}}
+"#
+        );
+
+        let fs = InMemoryFileSystem::new();
+        let pbx_path = PathBuf::from("/repo/Test.xcodeproj/project.pbxproj");
+        fs.insert(pbx_path.clone(), pbx);
+
+        let config = Config::default();
+        let logger = NullLogger;
+        Pipeline::new(&config, &fs, &logger)
+            .process(&pbx_path)
+            .unwrap();
+
+        let out = fs.get(&pbx_path).unwrap();
+        assert!(
+            out.contains("TargetAttributes = {"),
+            "TargetAttributes wrapper must survive the full pipeline:\n{out}"
+        );
+        assert!(
+            out.contains("DevelopmentTeam = P78229D8QW"),
+            "TargetAttributes inner team metadata must survive:\n{out}"
+        );
+        assert!(
+            out.contains("ProvisioningStyle = Manual"),
+            "TargetAttributes inner provisioning metadata must survive:\n{out}"
+        );
+    }
 }

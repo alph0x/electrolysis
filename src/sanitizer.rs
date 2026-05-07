@@ -52,6 +52,7 @@ pub struct SanitizeStats {
     pub duplicate_list_items_removed: usize,
     pub orphan_sections_removed: usize,
     pub orphan_object_bodies_removed: usize,
+    pub target_attributes_wrapper_added: bool,
 }
 
 /// Fix all known corruption patterns and return the cleaned text plus stats.
@@ -74,7 +75,15 @@ pub fn sanitize(input: &str) -> (String, SanitizeStats) {
     // previous uniquifier run stripped the UUID declaration header line.
     let after_bodies = remove_orphan_object_bodies(&after_orphans, &mut stats);
 
-    (after_bodies, stats)
+    // Pass 6 — ensure `PBXProject.attributes.TargetAttributes` exists.  Older
+    // electrolysis versions (and other tools) sometimes strip this wrapper
+    // entirely, leaving fastlane's `automatic_code_signing` /
+    // `update_code_signing_settings` actions to abort with the misleading
+    // "Seems to be a very old project file format" error.  An empty wrapper
+    // is sufficient — fastlane auto-populates per-target entries on demand.
+    let after_target_attrs = ensure_pbxproject_target_attributes(&after_bodies, &mut stats);
+
+    (after_target_attrs, stats)
 }
 
 // ── Pass 1 ──────────────────────────────────────────────────────────────────
@@ -166,6 +175,22 @@ fn dedup_object_declarations(input: &str, stats: &mut SanitizeStats) -> String {
             if objects_depth <= target {
                 skip_to_depth = None;
             }
+            continue;
+        }
+
+        // Only consider a UUID-keyed `… = {` line as an *object declaration*
+        // when it sits as a direct child of the `objects = {…}` wrapper —
+        // i.e. the depth before opening this brace was exactly 1.  Deeper
+        // nestings are UUID-keyed dicts that happen to share their key with
+        // a top-level object UUID (e.g. `attributes.TargetAttributes` in
+        // PBXProject indexes per-target signing metadata by target UUID).
+        // Treating those as duplicates strips the entry body and breaks
+        // tooling — fastlane's `automatic_code_signing` action requires
+        // the surviving entries to populate `code_sign_identity` and team.
+        let depth_before = objects_depth - delta;
+        if depth_before != 1 {
+            out.push_str(line);
+            out.push('\n');
             continue;
         }
 
@@ -419,6 +444,97 @@ fn remove_orphan_object_bodies(input: &str, stats: &mut SanitizeStats) -> String
     out
 }
 
+// ── Pass 6 ──────────────────────────────────────────────────────────────────
+
+/// Ensure that `PBXProject.attributes.TargetAttributes` exists.
+///
+/// fastlane's `automatic_code_signing` and `update_code_signing_settings`
+/// actions both bail with the misleading error `"Seems to be a very old
+/// project file format - please open your project file in a more recent
+/// version of Xcode"` when `attributes["TargetAttributes"]` is `nil` (Ruby
+/// nil — i.e. the wrapper is fully absent).  Older electrolysis versions
+/// stripped the wrapper entirely; modern Xcode 16+ doesn't write it back
+/// automatically; the actions that need it can't generate it themselves.
+///
+/// This pass adds an empty `TargetAttributes = { };` inside `PBXProject.
+/// attributes` when the wrapper is missing.  fastlane then auto-populates
+/// per-target entries on demand, so an empty wrapper is fully sufficient.
+///
+/// Idempotent: pbxprojs that already have any `TargetAttributes` block
+/// inside the PBXProject attributes are left untouched.
+fn ensure_pbxproject_target_attributes(input: &str, stats: &mut SanitizeStats) -> String {
+    let mut out = String::with_capacity(input.len() + 64);
+    let mut in_pbx_project_section = false;
+    let mut in_pbx_project_object = false;
+    let mut in_attributes = false;
+    let mut attr_depth: i32 = 0;
+    let mut saw_target_attributes = false;
+    let mut just_opened_attributes = false;
+    let mut injected = false;
+
+    for line in input.lines() {
+        if line.contains("/* Begin PBXProject section */") {
+            in_pbx_project_section = true;
+        }
+        if line.contains("/* End PBXProject section */") {
+            in_pbx_project_section = false;
+            in_pbx_project_object = false;
+        }
+
+        if in_pbx_project_section && !in_pbx_project_object && line.contains("isa = PBXProject;") {
+            in_pbx_project_object = true;
+        }
+
+        // Detect the opening line of `attributes = {`.
+        if in_pbx_project_object
+            && !in_attributes
+            && line.trim_start().starts_with("attributes = {")
+        {
+            in_attributes = true;
+            attr_depth = 1;
+            saw_target_attributes = false;
+            just_opened_attributes = true;
+        }
+
+        if in_attributes && !just_opened_attributes {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("TargetAttributes =") || trimmed.starts_with("TargetAttributes=") {
+                saw_target_attributes = true;
+            }
+
+            let delta = brace_delta(line);
+            if attr_depth + delta <= 0 {
+                // This line closes the attributes block.  Inject before it
+                // when no TargetAttributes child was present.
+                if !saw_target_attributes && !injected {
+                    let indent = leading_whitespace(line);
+                    out.push_str(indent);
+                    out.push_str("\tTargetAttributes = {\n");
+                    out.push_str(indent);
+                    out.push_str("\t};\n");
+                    injected = true;
+                    stats.target_attributes_wrapper_added = true;
+                }
+                in_attributes = false;
+                in_pbx_project_object = false;
+            }
+            attr_depth += delta;
+        }
+
+        just_opened_attributes = false;
+
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    out
+}
+
+fn leading_whitespace(s: &str) -> &str {
+    let trimmed = s.trim_start();
+    &s[..s.len() - trimmed.len()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,5 +568,269 @@ mod tests {
         let count = out.matches("ABCDEF123456789012345678").count();
         assert_eq!(count, 1);
         assert_eq!(stats.duplicate_list_items_removed, 1);
+    }
+
+    // ── PBXProject.attributes.TargetAttributes preservation ─────────────────
+    //
+    // Regression: the dedup pass walks every UUID-keyed `UUID = { … }` line
+    // inside `objects = {…}` regardless of nesting depth.  When a UUID
+    // appears as a *key* of `attributes.TargetAttributes` (signing metadata
+    // indexed by target UUID) **and** the same UUID is also the declaration
+    // of a top-level `PBXNativeTarget`, the dedup pass treats the inner
+    // entry as a duplicate and strips its body.  The wrapper survives empty.
+    //
+    // Fastlane's `automatic_code_signing` action requires
+    // `attributes["TargetAttributes"]` to exist with target entries; an
+    // empty wrapper auto-populates, but we still want the pre-existing
+    // metadata (DevelopmentTeam, ProvisioningStyle, LastSwiftMigration…)
+    // preserved because it carries non-default values.
+
+    fn pbxproj_with_target_attributes() -> String {
+        concat!(
+            "// !$*UTF8*$!\n",
+            "{\n",
+            "\tarchiveVersion = 1;\n",
+            "\tclasses = {\n",
+            "\t};\n",
+            "\tobjectVersion = 77;\n",
+            "\tobjects = {\n",
+            "/* Begin PBXNativeTarget section */\n",
+            "\t\tAAAAAAAAAAAAAAAAAAAAAAAA /* WAPA */ = {\n",
+            "\t\t\tisa = PBXNativeTarget;\n",
+            "\t\t\tname = WAPA;\n",
+            "\t\t};\n",
+            "/* End PBXNativeTarget section */\n",
+            "\n",
+            "/* Begin PBXProject section */\n",
+            "\t\tBBBBBBBBBBBBBBBBBBBBBBBB /* Project object */ = {\n",
+            "\t\t\tisa = PBXProject;\n",
+            "\t\t\tattributes = {\n",
+            "\t\t\t\tBuildIndependentTargetsInParallel = YES;\n",
+            "\t\t\t\tLastUpgradeCheck = 1330;\n",
+            "\t\t\t\tTargetAttributes = {\n",
+            "\t\t\t\t\tAAAAAAAAAAAAAAAAAAAAAAAA = {\n",
+            "\t\t\t\t\t\tDevelopmentTeam = P78229D8QW;\n",
+            "\t\t\t\t\t\tProvisioningStyle = Manual;\n",
+            "\t\t\t\t\t};\n",
+            "\t\t\t\t};\n",
+            "\t\t\t};\n",
+            "\t\t};\n",
+            "/* End PBXProject section */\n",
+            "\t};\n",
+            "\trootObject = BBBBBBBBBBBBBBBBBBBBBBBB;\n",
+            "}\n",
+        )
+        .to_string()
+    }
+
+    #[test]
+    fn preserves_target_attributes_entries_keyed_by_native_target_uuid() {
+        let input = pbxproj_with_target_attributes();
+        let (out, stats) = sanitize(&input);
+
+        assert!(
+            out.contains("DevelopmentTeam = P78229D8QW"),
+            "TargetAttributes inner entry must survive sanitize:\n{out}"
+        );
+        assert!(
+            out.contains("ProvisioningStyle = Manual"),
+            "all signing metadata inside TargetAttributes must survive:\n{out}"
+        );
+        // The native target itself must obviously also still be there.
+        assert!(out.contains("isa = PBXNativeTarget"));
+        // The native target's UUID must appear at least 3 times: section
+        // declaration, TargetAttributes key, plus possibly references.  The
+        // bug was that the second occurrence (TargetAttributes key) and its
+        // body were stripped, dropping the count to 1.
+        let count = out.matches("AAAAAAAAAAAAAAAAAAAAAAAA").count();
+        assert!(
+            count >= 2,
+            "expected UUID to appear in both PBXNativeTarget and \
+             TargetAttributes; got {count} occurrence(s):\n{out}"
+        );
+        assert_eq!(
+            stats.duplicate_objects_removed, 0,
+            "TargetAttributes entry must not be counted as a duplicate \
+             top-level object"
+        );
+    }
+
+    #[test]
+    fn still_dedups_real_duplicate_top_level_objects() {
+        // Regression guard for Step 4 of the plan: the depth fix must not
+        // weaken legitimate top-level dedup.  Same UUID declared twice as a
+        // direct child of `objects = {…}` should still collapse to one.
+        let input = concat!(
+            "// !$*UTF8*$!\n",
+            "{\n",
+            "\tarchiveVersion = 1;\n",
+            "\tobjectVersion = 77;\n",
+            "\tobjects = {\n",
+            "\t\tAAAAAAAAAAAAAAAAAAAAAAAA /* one */ = {\n",
+            "\t\t\tisa = PBXFileReference;\n",
+            "\t\t\tpath = a.swift;\n",
+            "\t\t};\n",
+            "\t\tAAAAAAAAAAAAAAAAAAAAAAAA /* dup */ = {\n",
+            "\t\t\tisa = PBXFileReference;\n",
+            "\t\t\tpath = a.swift;\n",
+            "\t\t};\n",
+            "\t};\n",
+            "\trootObject = AAAAAAAAAAAAAAAAAAAAAAAA;\n",
+            "}\n",
+        );
+        let (out, stats) = sanitize(input);
+        let count = out.matches("AAAAAAAAAAAAAAAAAAAAAAAA").count();
+        assert_eq!(
+            count, 2,
+            "one top-level decl plus rootObject reference; the duplicate \
+             body must be removed"
+        );
+        assert!(stats.duplicate_objects_removed >= 1);
+    }
+
+    #[test]
+    fn target_attributes_preservation_is_idempotent() {
+        let once = sanitize(&pbxproj_with_target_attributes()).0;
+        let (twice, stats) = sanitize(&once);
+        assert_eq!(once, twice, "second pass must be a no-op");
+        assert_eq!(stats.duplicate_objects_removed, 0);
+    }
+
+    // ── ensure_pbxproject_target_attributes (Pass 6) ─────────────────────────
+    //
+    // When `PBXProject.attributes.TargetAttributes` is fully absent — the
+    // wrapper isn't even there — fastlane's `automatic_code_signing` action
+    // bails with "very old project file format".  We add an empty wrapper so
+    // fastlane can auto-populate entries on demand.
+
+    fn pbxproj_without_target_attributes() -> String {
+        concat!(
+            "// !$*UTF8*$!\n",
+            "{\n",
+            "\tarchiveVersion = 1;\n",
+            "\tclasses = {\n",
+            "\t};\n",
+            "\tobjectVersion = 77;\n",
+            "\tobjects = {\n",
+            "/* Begin PBXNativeTarget section */\n",
+            "\t\tAAAAAAAAAAAAAAAAAAAAAAAA /* WAPA */ = {\n",
+            "\t\t\tisa = PBXNativeTarget;\n",
+            "\t\t\tname = WAPA;\n",
+            "\t\t};\n",
+            "/* End PBXNativeTarget section */\n",
+            "\n",
+            "/* Begin PBXProject section */\n",
+            "\t\tBBBBBBBBBBBBBBBBBBBBBBBB /* Project object */ = {\n",
+            "\t\t\tisa = PBXProject;\n",
+            "\t\t\tattributes = {\n",
+            "\t\t\t\tBuildIndependentTargetsInParallel = YES;\n",
+            "\t\t\t\tLastUpgradeCheck = 1330;\n",
+            "\t\t\t};\n",
+            "\t\t\tbuildConfigurationList = CCCCCCCCCCCCCCCCCCCCCCCC;\n",
+            "\t\t};\n",
+            "/* End PBXProject section */\n",
+            "\t};\n",
+            "\trootObject = BBBBBBBBBBBBBBBBBBBBBBBB;\n",
+            "}\n",
+        )
+        .to_string()
+    }
+
+    #[test]
+    fn injects_empty_target_attributes_wrapper_when_missing() {
+        let input = pbxproj_without_target_attributes();
+        assert!(!input.contains("TargetAttributes"), "fixture must lack wrapper");
+
+        let (out, stats) = sanitize(&input);
+
+        assert!(stats.target_attributes_wrapper_added, "stat must flip");
+        assert!(
+            out.contains("TargetAttributes = {"),
+            "wrapper must be added inside attributes block:\n{out}"
+        );
+        // Pre-existing keys must still be there:
+        assert!(out.contains("BuildIndependentTargetsInParallel = YES"));
+        assert!(out.contains("LastUpgradeCheck = 1330"));
+    }
+
+    #[test]
+    fn target_attributes_lives_inside_pbxproject_attributes_block() {
+        let (out, _) = sanitize(&pbxproj_without_target_attributes());
+
+        // The new TargetAttributes line must appear AFTER `attributes = {`
+        // and BEFORE its closing `};`, inside the PBXProject block.
+        let after_attrs_open = out
+            .find("attributes = {")
+            .expect("attributes block must exist");
+        let target_attrs_pos = out
+            .find("TargetAttributes = {")
+            .expect("wrapper must be inserted");
+        assert!(
+            target_attrs_pos > after_attrs_open,
+            "TargetAttributes must come after `attributes = {{`"
+        );
+        // And before buildConfigurationList (which is the next sibling key
+        // in PBXProject after attributes).
+        let bcl_pos = out
+            .find("buildConfigurationList")
+            .expect("buildConfigurationList must remain");
+        assert!(
+            target_attrs_pos < bcl_pos,
+            "TargetAttributes must be inside attributes, before buildConfigurationList"
+        );
+    }
+
+    #[test]
+    fn does_not_inject_when_target_attributes_already_exists() {
+        let (out, stats) = sanitize(&pbxproj_with_target_attributes());
+        assert!(
+            !stats.target_attributes_wrapper_added,
+            "must not inject when wrapper is already present"
+        );
+        // Entry from the fixture must remain (tests preservation + no double).
+        assert_eq!(
+            out.matches("TargetAttributes = {").count(),
+            1,
+            "must not duplicate existing wrapper"
+        );
+    }
+
+    #[test]
+    fn does_not_inject_when_empty_wrapper_already_exists() {
+        // Edge case: wrapper exists but is empty.  fastlane would already
+        // pass the guard.  Don't add a second wrapper.
+        let input = concat!(
+            "// !$*UTF8*$!\n",
+            "{\n",
+            "\tarchiveVersion = 1;\n",
+            "\tobjectVersion = 77;\n",
+            "\tobjects = {\n",
+            "/* Begin PBXProject section */\n",
+            "\t\tBBBBBBBBBBBBBBBBBBBBBBBB /* Project object */ = {\n",
+            "\t\t\tisa = PBXProject;\n",
+            "\t\t\tattributes = {\n",
+            "\t\t\t\tTargetAttributes = {\n",
+            "\t\t\t\t};\n",
+            "\t\t\t};\n",
+            "\t\t};\n",
+            "/* End PBXProject section */\n",
+            "\t};\n",
+            "\trootObject = BBBBBBBBBBBBBBBBBBBBBBBB;\n",
+            "}\n",
+        );
+        let (out, stats) = sanitize(input);
+        assert!(!stats.target_attributes_wrapper_added);
+        assert_eq!(out.matches("TargetAttributes = {").count(), 1);
+    }
+
+    #[test]
+    fn injection_is_idempotent() {
+        let once = sanitize(&pbxproj_without_target_attributes()).0;
+        let (twice, stats) = sanitize(&once);
+        assert_eq!(once, twice, "second pass must be a no-op");
+        assert!(
+            !stats.target_attributes_wrapper_added,
+            "second pass must not re-inject"
+        );
     }
 }
