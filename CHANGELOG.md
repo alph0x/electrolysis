@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.1] - 2026-05-07
+
+### Fixed
+
+- **Orphan `BlueprintIdentifier` repair** — schemes whose `BlueprintIdentifier` no longer corresponds to any target in the pbxproj are now repaired by resolving them through `BlueprintName` against the project's current target index. Previously, only UUIDs that changed in the *current* uniquify pass were propagated; orphans that pre-dated the run (e.g. introduced by an older tool, manual edits, or pre-1.4.0 electrolysis runs) stayed broken even after `update_shared_schemes` reported success. The repair pass is conservative: it only acts when the orphan's `ReferencedContainer` matches the project being processed and `BlueprintName` resolves to a single target — duplicate names and cross-project references are left untouched.
+
+### Internal
+
+- New `scheme_updater::repair_orphan_blueprint_identifiers` (pure) and `repair_shared_schemes` (orchestrator) functions, plus a `build_scheme_repair_inputs` helper in `pipeline` that produces the `name → uuid` index and the post-rename UUID set from the parsed `PbxProject`. All paths covered by unit tests.
+
 ## [1.4.0] - 2026-05-07
 
 ### Added

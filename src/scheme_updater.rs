@@ -7,7 +7,7 @@
 //! pbxproj — so without this pass the schemes orphan as soon as the
 //! uniquifier runs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -24,6 +24,19 @@ use crate::pipeline::FileSystem;
 static RE_BLUEPRINT: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"BlueprintIdentifier\s*=\s*"([0-9A-Fa-f]{32}|[0-9A-Fa-f]{24})""#)
         .expect("BlueprintIdentifier regex must compile")
+});
+
+// Captures one whole `<BuildableReference …>` opening element (attributes
+// span multiple lines, so `(?s)` lets `.` match newlines).
+static RE_BUILDABLE_REF: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?s)<BuildableReference\b[^>]*>"#)
+        .expect("BuildableReference regex must compile")
+});
+
+// Generic `Attr = "value"` matcher used to read attributes out of a
+// captured `<BuildableReference>` block.
+static RE_SCHEME_ATTR: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(\w+)\s*=\s*"([^"]*)""#).expect("scheme attribute regex must compile")
 });
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -107,6 +120,139 @@ pub fn update_shared_schemes(
     }
 
     Ok(stats)
+}
+
+/// Repair `BlueprintIdentifier` values whose UUID no longer corresponds to
+/// any target in the pbxproj, by resolving them via `BlueprintName` against
+/// the project's current target name → uuid index.
+///
+/// A `<BuildableReference>` block is repaired only when **all** of the
+/// following hold:
+///
+/// 1. its current `BlueprintIdentifier` is **not** present in `valid_uuids`
+///    (i.e. genuinely orphaned — not a cross-project reference whose UUID
+///    is correctly resolved by some other pbxproj),
+/// 2. its `BlueprintName` resolves to a single UUID in `name_index`, and
+/// 3. its `ReferencedContainer` equals `container:<expected_container>`.
+///
+/// References that fail any of these guards are left untouched, keeping the
+/// pass conservative — we only ever repair what we can prove belongs to us.
+///
+/// Returns the new XML and the number of identifiers repaired.
+pub fn repair_orphan_blueprint_identifiers(
+    xml: &str,
+    name_index: &HashMap<String, String>,
+    valid_uuids: &HashSet<String>,
+    expected_container: &str,
+) -> (String, usize) {
+    if name_index.is_empty() {
+        return (xml.to_string(), 0);
+    }
+
+    let expected_ref = format!("container:{}", expected_container);
+    let mut count = 0usize;
+
+    let new_xml = RE_BUILDABLE_REF.replace_all(xml, |caps: &regex::Captures| {
+        let block = &caps[0];
+        let attrs = parse_scheme_attrs(block);
+
+        let Some(current_id) = attrs.get("BlueprintIdentifier") else {
+            return block.to_string();
+        };
+        let Some(blueprint_name) = attrs.get("BlueprintName") else {
+            return block.to_string();
+        };
+        let Some(container) = attrs.get("ReferencedContainer") else {
+            return block.to_string();
+        };
+
+        if container != &expected_ref {
+            return block.to_string();
+        }
+        if valid_uuids.contains(&current_id.to_uppercase())
+            || valid_uuids.contains(*current_id)
+        {
+            return block.to_string();
+        }
+        let Some(canonical) = name_index.get(*blueprint_name) else {
+            return block.to_string();
+        };
+
+        count += 1;
+        let needle = format!(r#"BlueprintIdentifier = "{}""#, current_id);
+        let alt_needle = format!(r#"BlueprintIdentifier="{}""#, current_id);
+        let replacement = format!(r#"BlueprintIdentifier = "{}""#, canonical);
+        block
+            .replace(&needle, &replacement)
+            .replace(&alt_needle, &replacement)
+    });
+
+    (new_xml.into_owned(), count)
+}
+
+/// Walk `<bundle>.xcodeproj/xcshareddata/xcschemes` and apply the orphan
+/// repair pass to every `.xcscheme` file.  Idempotent.
+pub fn repair_shared_schemes(
+    xcodeproj_dir: &Path,
+    name_index: &HashMap<String, String>,
+    valid_uuids: &HashSet<String>,
+    expected_container: &str,
+    fs: &dyn FileSystem,
+    logger: &dyn Logger,
+) -> Result<UpdateStats> {
+    let mut stats = UpdateStats::default();
+    if name_index.is_empty() {
+        return Ok(stats);
+    }
+
+    let schemes_dir = xcodeproj_dir.join("xcshareddata").join("xcschemes");
+    let entries = match fs.list_dir(&schemes_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(stats),
+    };
+
+    for path in entries {
+        if path.extension().and_then(|e| e.to_str()) != Some("xcscheme") {
+            continue;
+        }
+        stats.files_scanned += 1;
+
+        let content = fs
+            .read_to_string(&path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        let (new_content, repaired) = repair_orphan_blueprint_identifiers(
+            &content,
+            name_index,
+            valid_uuids,
+            expected_container,
+        );
+
+        if repaired == 0 || new_content == content {
+            continue;
+        }
+
+        fs.write_atomic(&path, &new_content)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        stats.files_modified += 1;
+        stats.identifiers_replaced += repaired;
+        logger.verbose(&format!(
+            "  ✓ repaired {} ({} orphan BlueprintIdentifier(s))",
+            path.display(),
+            repaired
+        ));
+    }
+
+    Ok(stats)
+}
+
+fn parse_scheme_attrs(block: &str) -> HashMap<&str, &str> {
+    let mut out = HashMap::new();
+    for caps in RE_SCHEME_ATTR.captures_iter(block) {
+        let key = caps.get(1).unwrap().as_str();
+        let value = caps.get(2).unwrap().as_str();
+        out.entry(key).or_insert(value);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -411,5 +557,199 @@ mod tests {
         assert_eq!(first.files_modified, 1);
         assert_eq!(second.files_modified, 0);
         assert_eq!(second.identifiers_replaced, 0);
+    }
+
+    // ── repair_orphan_blueprint_identifiers ──────────────────────────────────
+    //
+    // Orphan repair complements the rename-based propagation: when a scheme
+    // contains a `BlueprintIdentifier` UUID that no longer exists in the
+    // pbxproj — and was never part of a same-pass uniquify rename — the only
+    // way to recover the link is to resolve it by `BlueprintName` against the
+    // pbxproj's current target name → uuid index.
+
+    fn name_index(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(n, u)| ((*n).to_string(), (*u).to_string()))
+            .collect()
+    }
+
+    fn valid(uuids: &[&str]) -> HashSet<String> {
+        uuids.iter().map(|u| (*u).to_string()).collect()
+    }
+
+    fn buildable_ref(uuid: &str, name: &str, container: &str) -> String {
+        format!(
+            r#"<BuildableReference
+                  BuildableIdentifier = "primary"
+                  BlueprintIdentifier = "{uuid}"
+                  BuildableName = "{name}.app"
+                  BlueprintName = "{name}"
+                  ReferencedContainer = "container:{container}">
+               </BuildableReference>"#
+        )
+    }
+
+    #[test]
+    fn repairs_orphan_blueprint_id_by_name() {
+        let xml = buildable_ref("00000000000000000000000000000000", "WAPA", "App.xcodeproj");
+        let names = name_index(&[("WAPA", "BE4D3D56F59CC4FC5CEC03367E182C87")]);
+        let valid = valid(&["BE4D3D56F59CC4FC5CEC03367E182C87"]);
+
+        let (out, n) = repair_orphan_blueprint_identifiers(
+            &xml,
+            &names,
+            &valid,
+            "App.xcodeproj",
+        );
+        assert_eq!(n, 1);
+        assert!(out.contains(r#"BlueprintIdentifier = "BE4D3D56F59CC4FC5CEC03367E182C87""#));
+        assert!(!out.contains("00000000000000000000000000000000"));
+    }
+
+    #[test]
+    fn leaves_already_valid_blueprint_id_alone() {
+        let xml = buildable_ref("BE4D3D56F59CC4FC5CEC03367E182C87", "WAPA", "App.xcodeproj");
+        let names = name_index(&[("WAPA", "BE4D3D56F59CC4FC5CEC03367E182C87")]);
+        let valid = valid(&["BE4D3D56F59CC4FC5CEC03367E182C87"]);
+
+        let (out, n) = repair_orphan_blueprint_identifiers(
+            &xml,
+            &names,
+            &valid,
+            "App.xcodeproj",
+        );
+        assert_eq!(n, 0, "valid identifiers must not be repaired");
+        assert_eq!(out, xml);
+    }
+
+    #[test]
+    fn does_not_repair_cross_project_references() {
+        // ReferencedContainer points to a different project — the orphan UUID
+        // is correctly resolved over there, even though the BlueprintName
+        // happens to collide with one of our targets.
+        let xml = buildable_ref(
+            "00000000000000000000000000000000",
+            "WAPA",
+            "Other.xcodeproj",
+        );
+        let names = name_index(&[("WAPA", "BE4D3D56F59CC4FC5CEC03367E182C87")]);
+        let valid = valid(&["BE4D3D56F59CC4FC5CEC03367E182C87"]);
+
+        let (out, n) = repair_orphan_blueprint_identifiers(
+            &xml,
+            &names,
+            &valid,
+            "App.xcodeproj",
+        );
+        assert_eq!(n, 0, "cross-project refs must not be touched");
+        assert_eq!(out, xml);
+    }
+
+    #[test]
+    fn leaves_orphan_alone_when_name_is_unknown() {
+        let xml = buildable_ref(
+            "00000000000000000000000000000000",
+            "Ghost",
+            "App.xcodeproj",
+        );
+        let names = name_index(&[("WAPA", "BE4D3D56F59CC4FC5CEC03367E182C87")]);
+        let valid = valid(&["BE4D3D56F59CC4FC5CEC03367E182C87"]);
+
+        let (out, n) = repair_orphan_blueprint_identifiers(
+            &xml,
+            &names,
+            &valid,
+            "App.xcodeproj",
+        );
+        assert_eq!(n, 0, "unknown names cannot be resolved");
+        assert_eq!(out, xml);
+    }
+
+    #[test]
+    fn repair_is_idempotent() {
+        let xml = buildable_ref("00000000000000000000000000000000", "WAPA", "App.xcodeproj");
+        let names = name_index(&[("WAPA", "BE4D3D56F59CC4FC5CEC03367E182C87")]);
+        let valid = valid(&["BE4D3D56F59CC4FC5CEC03367E182C87"]);
+
+        let (once, _) =
+            repair_orphan_blueprint_identifiers(&xml, &names, &valid, "App.xcodeproj");
+        let (twice, n) =
+            repair_orphan_blueprint_identifiers(&once, &names, &valid, "App.xcodeproj");
+        assert_eq!(once, twice, "second pass must be a no-op");
+        assert_eq!(n, 0, "second pass must repair nothing");
+    }
+
+    #[test]
+    fn repairs_multiple_orphans_in_one_xml() {
+        let xml = format!(
+            "{}\n{}\n{}",
+            buildable_ref("00000000000000000000000000000000", "WAPA", "App.xcodeproj"),
+            buildable_ref("11111111111111111111111111111111", "Tests", "App.xcodeproj"),
+            buildable_ref(
+                "BE4D3D56F59CC4FC5CEC03367E182C87",
+                "WAPA",
+                "App.xcodeproj"
+            ), // already valid
+        );
+        let names = name_index(&[
+            ("WAPA", "BE4D3D56F59CC4FC5CEC03367E182C87"),
+            ("Tests", "513196272F46623400E4153F"),
+        ]);
+        let valid = valid(&[
+            "BE4D3D56F59CC4FC5CEC03367E182C87",
+            "513196272F46623400E4153F",
+        ]);
+
+        let (out, n) = repair_orphan_blueprint_identifiers(
+            &xml,
+            &names,
+            &valid,
+            "App.xcodeproj",
+        );
+        assert_eq!(n, 2);
+        assert!(!out.contains("00000000000000000000000000000000"));
+        assert!(!out.contains("11111111111111111111111111111111"));
+        assert_eq!(
+            out.matches("BE4D3D56F59CC4FC5CEC03367E182C87").count(),
+            2,
+            "WAPA target id should appear in both WAPA buildable refs"
+        );
+        assert_eq!(out.matches("513196272F46623400E4153F").count(), 1);
+    }
+
+    // ── repair_shared_schemes (orchestrator) ─────────────────────────────────
+
+    #[test]
+    fn orchestrator_repairs_orphans_across_scheme_dir() {
+        let fs = InMemoryFileSystem::new();
+        let bundle = PathBuf::from("/repo/App.xcodeproj");
+        let dir = bundle.join("xcshareddata/xcschemes");
+        fs.insert(
+            dir.join("WAPA.xcscheme"),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?><Scheme>{}</Scheme>"#,
+                buildable_ref("00000000000000000000000000000000", "WAPA", "App.xcodeproj")
+            ),
+        );
+
+        let names = name_index(&[("WAPA", "BE4D3D56F59CC4FC5CEC03367E182C87")]);
+        let valid = valid(&["BE4D3D56F59CC4FC5CEC03367E182C87"]);
+
+        let stats = repair_shared_schemes(
+            &bundle,
+            &names,
+            &valid,
+            "App.xcodeproj",
+            &fs,
+            &NullLogger,
+        )
+        .unwrap();
+        assert_eq!(stats.files_scanned, 1);
+        assert_eq!(stats.files_modified, 1);
+        assert_eq!(stats.identifiers_replaced, 1);
+
+        let written = fs.get(&dir.join("WAPA.xcscheme")).unwrap();
+        assert!(written.contains("BE4D3D56F59CC4FC5CEC03367E182C87"));
     }
 }

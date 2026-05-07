@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -7,7 +8,7 @@ use crate::config::Config;
 use crate::error::ElectrolysisError;
 use crate::logger::Logger;
 use crate::mapper;
-use crate::parser;
+use crate::parser::{self, PbxProject};
 use crate::sanitizer;
 use crate::scheme_updater;
 use crate::sorter;
@@ -138,6 +139,7 @@ impl<'a> Pipeline<'a> {
             ));
 
             self.propagate_to_schemes(pbxproj_path, &unique_map.map)?;
+            self.repair_orphan_schemes(pbxproj_path, &proj, &unique_map.map, &proj_root_name)?;
 
             let (post_sanitized, post_san_stats) = sanitizer::sanitize(&current);
             current = post_sanitized;
@@ -218,7 +220,7 @@ impl<'a> Pipeline<'a> {
     fn propagate_to_schemes(
         &self,
         pbxproj_path: &Path,
-        map: &std::collections::HashMap<String, String>,
+        map: &HashMap<String, String>,
     ) -> Result<()> {
         if !self.config.update_schemes || self.config.check {
             return Ok(());
@@ -233,6 +235,51 @@ impl<'a> Pipeline<'a> {
         if stats.files_modified > 0 {
             self.logger.info(&format!(
                 "{} {} scheme(s) updated ({} BlueprintIdentifier(s) remapped)",
+                "  ✓".green(),
+                stats.files_modified,
+                stats.identifiers_replaced,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Repair `BlueprintIdentifier` values in shared schemes that no longer
+    /// resolve to any target in the pbxproj.  This complements
+    /// `propagate_to_schemes`: rename propagation only fixes UUIDs that
+    /// changed in the *current* uniquify pass.  Orphans that pre-date this
+    /// run (e.g. introduced by an older tool, a manual edit, or a previous
+    /// release without scheme propagation) are invisible to the rename map
+    /// and must be re-resolved by `BlueprintName`.
+    fn repair_orphan_schemes(
+        &self,
+        pbxproj_path: &Path,
+        proj: &PbxProject,
+        unique_map: &HashMap<String, String>,
+        project_name: &str,
+    ) -> Result<()> {
+        if !self.config.update_schemes || self.config.check {
+            return Ok(());
+        }
+        let (name_index, valid_uuids) = build_scheme_repair_inputs(proj, unique_map);
+        if name_index.is_empty() {
+            return Ok(());
+        }
+        let xcodeproj_dir = pbxproj_path.parent().unwrap_or(pbxproj_path);
+        // `project_name` is already the bundle directory name (e.g.
+        // "GoPagos.xcodeproj"), matching the `container:<…>` suffix Xcode
+        // writes into scheme files.  Concatenating `.xcodeproj` here would
+        // double the extension and silently disable the repair guard.
+        let stats = scheme_updater::repair_shared_schemes(
+            xcodeproj_dir,
+            &name_index,
+            &valid_uuids,
+            project_name,
+            self.fs,
+            self.logger,
+        )?;
+        if stats.files_modified > 0 {
+            self.logger.info(&format!(
+                "{} {} scheme(s) repaired ({} orphan BlueprintIdentifier(s))",
                 "  ✓".green(),
                 stats.files_modified,
                 stats.identifiers_replaced,
@@ -535,6 +582,52 @@ pub fn infer_project_name(pbxproj: &Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("Project.xcodeproj")
         .to_string()
+}
+
+/// Build the inputs that the orphan-scheme repair pass needs:
+///
+/// * `name_index` — `target name → post-rename UUID` for every native and
+///   aggregate target whose name is **unambiguous** in the project.  Targets
+///   sharing a name are excluded because we cannot safely guess which UUID a
+///   stale `BlueprintIdentifier` referred to.
+/// * `valid_uuids` — every UUID present in the post-rename pbxproj, used as
+///   the orphan filter (a `BlueprintIdentifier` that is still in this set is
+///   not orphaned and must not be repaired).
+fn build_scheme_repair_inputs(
+    proj: &PbxProject,
+    unique_map: &HashMap<String, String>,
+) -> (HashMap<String, String>, HashSet<String>) {
+    let translate = |old: &str| -> String {
+        unique_map
+            .get(&old.to_uppercase())
+            .cloned()
+            .unwrap_or_else(|| old.to_string())
+    };
+
+    let target_uuids = proj
+        .array_field(&proj.root_object, "targets")
+        .unwrap_or_default();
+
+    let mut name_counts: HashMap<String, u32> = HashMap::new();
+    let mut name_index: HashMap<String, String> = HashMap::new();
+    for old_uuid in &target_uuids {
+        let isa = proj.isa(old_uuid).unwrap_or("");
+        if isa != "PBXNativeTarget" && isa != "PBXAggregateTarget" {
+            continue;
+        }
+        let Some(name) = proj.str_field(old_uuid, "name") else {
+            continue;
+        };
+        let new_uuid = translate(old_uuid);
+        *name_counts.entry(name.to_string()).or_insert(0) += 1;
+        name_index.insert(name.to_string(), new_uuid);
+    }
+    name_index.retain(|name, _| name_counts.get(name) == Some(&1));
+
+    let valid_uuids: HashSet<String> =
+        proj.objects.keys().map(|old| translate(old)).collect();
+
+    (name_index, valid_uuids)
 }
 
 // ── In-memory double for unit tests ───────────────────────────────────────────
@@ -844,5 +937,146 @@ mod tests {
         let pipeline = Pipeline::new(&config, &fs, &logger);
         let outcome = pipeline.process(&path).unwrap();
         assert!(matches!(outcome, PipelineOutcome::Clean));
+    }
+
+    // ── build_scheme_repair_inputs ───────────────────────────────────────────
+
+    fn pbxproj_with_targets(target_decls: &str, target_uuids: &str) -> String {
+        format!(
+            r#"// !$*UTF8*$!
+{{
+    archiveVersion = 1;
+    classes = {{}};
+    objectVersion = 56;
+    objects = {{
+        BBBBBBBBBBBBBBBBBBBBBBBB /* Project object */ = {{
+            isa = PBXProject;
+            mainGroup = CCCCCCCCCCCCCCCCCCCCCCCC;
+            targets = (
+                {target_uuids}
+            );
+        }};
+        CCCCCCCCCCCCCCCCCCCCCCCC /* root */ = {{
+            isa = PBXGroup;
+            children = ();
+            sourceTree = "<group>";
+        }};
+        {target_decls}
+    }};
+    rootObject = BBBBBBBBBBBBBBBBBBBBBBBB;
+}}
+"#
+        )
+    }
+
+    #[test]
+    fn build_scheme_repair_inputs_indexes_native_and_aggregate_targets() {
+        let pbx = pbxproj_with_targets(
+            r#"
+                AAAAAAAAAAAAAAAAAAAAAAAA = { isa = PBXNativeTarget; name = WAPA; };
+                DDDDDDDDDDDDDDDDDDDDDDDD = { isa = PBXAggregateTarget; name = "Build All"; };
+            "#,
+            "AAAAAAAAAAAAAAAAAAAAAAAA, DDDDDDDDDDDDDDDDDDDDDDDD,",
+        );
+        let proj = parser::parse_project(&pbx).unwrap();
+
+        let mut unique = HashMap::new();
+        unique.insert(
+            "AAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+            "BE4D3D56F59CC4FC5CEC03367E182C87".to_string(),
+        );
+
+        let (names, valid) = build_scheme_repair_inputs(&proj, &unique);
+        assert_eq!(
+            names.get("WAPA"),
+            Some(&"BE4D3D56F59CC4FC5CEC03367E182C87".to_string()),
+            "renamed UUIDs must be translated"
+        );
+        assert_eq!(
+            names.get("Build All"),
+            Some(&"DDDDDDDDDDDDDDDDDDDDDDDD".to_string()),
+            "untranslated UUIDs pass through"
+        );
+        assert!(valid.contains("BE4D3D56F59CC4FC5CEC03367E182C87"));
+        assert!(valid.contains("DDDDDDDDDDDDDDDDDDDDDDDD"));
+        assert!(!valid.contains("AAAAAAAAAAAAAAAAAAAAAAAA"));
+    }
+
+    #[test]
+    fn pipeline_repairs_orphan_scheme_blueprint_identifiers() {
+        // Regression: the bundle name passed as `expected_container` must
+        // match the `container:<…>` suffix Xcode writes — i.e. include the
+        // `.xcodeproj` extension exactly once.  Earlier wiring concatenated
+        // `.xcodeproj` to a name that already had it, silently disabling
+        // the repair pass.
+        let pbx = pbxproj_with_targets(
+            r#"
+                AAAAAAAAAAAAAAAAAAAAAAAA = { isa = PBXNativeTarget; name = WAPA; };
+            "#,
+            "AAAAAAAAAAAAAAAAAAAAAAAA,",
+        );
+        let fs = InMemoryFileSystem::new();
+        let pbx_path = PathBuf::from("/repo/Test.xcodeproj/project.pbxproj");
+        fs.insert(pbx_path.clone(), pbx);
+
+        let scheme_path =
+            PathBuf::from("/repo/Test.xcodeproj/xcshareddata/xcschemes/WAPA.xcscheme");
+        let orphan_uuid = "DEADBEEFDEADBEEFDEADBEEFDEADBEEF";
+        fs.insert(
+            scheme_path.clone(),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<Scheme>
+  <BuildAction>
+    <BuildActionEntries>
+      <BuildActionEntry>
+        <BuildableReference
+           BuildableIdentifier = "primary"
+           BlueprintIdentifier = "{orphan_uuid}"
+           BuildableName = "WAPA.app"
+           BlueprintName = "WAPA"
+           ReferencedContainer = "container:Test.xcodeproj">
+        </BuildableReference>
+      </BuildActionEntry>
+    </BuildActionEntries>
+  </BuildAction>
+</Scheme>
+"#
+            ),
+        );
+
+        let config = Config::default();
+        let logger = NullLogger;
+        let pipeline = Pipeline::new(&config, &fs, &logger);
+        pipeline.process(&pbx_path).unwrap();
+
+        let written = fs.get(&scheme_path).unwrap();
+        assert!(
+            !written.contains(orphan_uuid),
+            "orphan id should have been replaced; got:\n{written}"
+        );
+        // The repaired UUID is whatever the uniquifier assigned to the
+        // WAPA target — assert by `BlueprintName="WAPA"` proximity.
+        assert!(
+            written.contains(r#"BlueprintName = "WAPA""#),
+            "BlueprintName must be preserved"
+        );
+    }
+
+    #[test]
+    fn build_scheme_repair_inputs_drops_ambiguous_names() {
+        let pbx = pbxproj_with_targets(
+            r#"
+                AAAAAAAAAAAAAAAAAAAAAAAA = { isa = PBXNativeTarget; name = Twin; };
+                DDDDDDDDDDDDDDDDDDDDDDDD = { isa = PBXNativeTarget; name = Twin; };
+                EEEEEEEEEEEEEEEEEEEEEEEE = { isa = PBXNativeTarget; name = Solo; };
+            "#,
+            "AAAAAAAAAAAAAAAAAAAAAAAA, DDDDDDDDDDDDDDDDDDDDDDDD, EEEEEEEEEEEEEEEEEEEEEEEE,",
+        );
+        let proj = parser::parse_project(&pbx).unwrap();
+
+        let (names, _valid) = build_scheme_repair_inputs(&proj, &HashMap::new());
+        assert!(!names.contains_key("Twin"), "duplicate names must be excluded");
+        assert!(names.contains_key("Solo"));
     }
 }
