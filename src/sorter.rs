@@ -94,7 +94,7 @@ pub struct SortStats {
 }
 
 /// Sort a pbxproj text and return (sorted_text, stats).
-pub fn sort(input: &str) -> (String, SortStats) {
+pub fn sort(input: &str, sort_main_group: bool) -> (String, SortStats) {
     let mut stats = SortStats::default();
 
     // We need to know the main-group UUID so we can skip sorting its children.
@@ -102,7 +102,7 @@ pub fn sort(input: &str) -> (String, SortStats) {
     let main_group_uuid = extract_main_group_uuid(input).unwrap_or_default();
 
     let after_files          = sort_files_lists(input, &mut stats);
-    let after_children       = sort_children_lists(&after_files, &main_group_uuid, &mut stats);
+    let after_children       = sort_children_lists(&after_files, &main_group_uuid, sort_main_group, &mut stats);
     let after_pbx            = sort_pbx_sections(&after_children, &mut stats);
     let after_build_configs  = sort_xc_build_configurations(&after_pbx, &mut stats);
     let after_variant_groups = sort_pbx_variant_groups(&after_build_configs, &mut stats);
@@ -148,10 +148,9 @@ fn sort_files_lists(input: &str, stats: &mut SortStats) -> String {
 
 // ── Pass 2: sort `children = (…)` ────────────────────────────────────────────
 
-fn sort_children_lists(input: &str, main_group_uuid: &str, stats: &mut SortStats) -> String {
+fn sort_children_lists(input: &str, main_group_uuid: &str, sort_main_group: bool, stats: &mut SortStats) -> String {
     // The list that belongs to the main group is left unsorted to preserve
-    // the Xcode navigator order.  We detect it by checking whether the
-    // previous non-empty line contains the main-group UUID.
+    // the Xcode navigator order, unless `sort_main_group` is true.
     let main_group_upper = main_group_uuid.to_uppercase();
     sort_list_sections(
         input,
@@ -165,8 +164,10 @@ fn sort_children_lists(input: &str, main_group_uuid: &str, stats: &mut SortStats
             format!("{}{}", u8::from(name.contains('.')), name.to_lowercase())
         },
         |i, lines| {
-            // should_sort = true when this list does NOT belong to the main group.
-            main_group_upper.is_empty()
+            // should_sort = true when this list does NOT belong to the main group,
+            // or when sort_main_group is enabled.
+            sort_main_group
+                || main_group_upper.is_empty()
                 || !lines[..i]
                     .iter()
                     .rev()
@@ -185,7 +186,7 @@ fn sort_children_lists(input: &str, main_group_uuid: &str, stats: &mut SortStats
 /// - `is_start`     — returns `true` for the line that opens a list (`files = (`, etc.)
 /// - `sort_key`     — derives a sortable `String` from a list-entry line
 /// - `should_sort`  — given the opener's index and all lines, returns `true` if
-///                    this list should be sorted (used to skip the main group)
+///   this list should be sorted (used to skip the main group)
 /// - `on_sorted`    — increments the appropriate `SortStats` counter
 fn sort_list_sections(
     input: &str,
@@ -567,7 +568,7 @@ mod tests {
             "\t\t\t\tAAAAAAAAAAAAAAAAAAAAAAAA /* alpha.swift in Sources */,\n",
             "\t\t\t);\n",
         );
-        let (out, _) = sort(input);
+        let (out, _) = sort(input, false);
         let pos_alpha = out.find("alpha.swift").unwrap();
         let pos_zebra = out.find("zebra.swift").unwrap();
         assert!(pos_alpha < pos_zebra, "alpha should come before zebra");
@@ -581,7 +582,7 @@ mod tests {
             "\t\t\t\tAAAAAAAAAAAAAAAAAAAAAAAA /* file.swift */,\n",
             "\t\t\t);\n",
         );
-        let (out, stats) = sort(input);
+        let (out, stats) = sort(input, false);
         assert_eq!(out.matches("AAAAAAAAAAAAAAAAAAAAAAAA").count(), 1);
         assert_eq!(stats.duplicate_entries_removed, 1);
     }
@@ -602,7 +603,7 @@ mod tests {
             "\t\t};\n",
             "/* End XCBuildConfiguration section */\n",
         );
-        let (out, stats) = sort(input);
+        let (out, stats) = sort(input, false);
         let pos_debug = out.find("Pods-App.debug").unwrap();
         let pos_release = out.find("Pods-App.release").unwrap();
         assert!(pos_debug < pos_release, "debug should sort before release");
@@ -624,7 +625,7 @@ mod tests {
             "\t\t};\n",
             "/* End XCBuildConfiguration section */\n",
         );
-        let (out, _) = sort(input);
+        let (out, _) = sort(input, false);
         let pos_debug = out.find("/* Debug */").unwrap();
         let pos_release = out.find("/* Release */").unwrap();
         assert!(pos_debug < pos_release, "Debug should sort before Release");
@@ -644,7 +645,7 @@ mod tests {
             "\t\t};\n",
             "/* End PBXVariantGroup section */\n",
         );
-        let (out, stats) = sort(input);
+        let (out, stats) = sort(input, false);
         let pos_alpha = out.find("Alpha.strings").unwrap();
         let pos_zebra = out.find("Zebra.strings").unwrap();
         assert!(pos_alpha < pos_zebra, "Alpha should sort before Zebra");
@@ -665,7 +666,7 @@ mod tests {
             "\t\t};\n",
             "/* End XCConfigurationList section */\n",
         );
-        let (out, stats) = sort(input);
+        let (out, stats) = sort(input, false);
         let pos_alpha = out.find("\"alpha\"").unwrap();
         let pos_zebra = out.find("\"zebra\"").unwrap();
         assert!(pos_alpha < pos_zebra, "alpha should sort before zebra");
@@ -686,7 +687,7 @@ mod tests {
             "\t\t};\n",
             "/* End PBXNativeTarget section */\n",
         );
-        let (out, stats) = sort(input);
+        let (out, stats) = sort(input, false);
         let pos_alpha = out.find("AlphaApp").unwrap();
         let pos_zebra = out.find("ZebraApp").unwrap();
         assert!(pos_alpha < pos_zebra, "AlphaApp should sort before ZebraApp");
@@ -707,7 +708,7 @@ mod tests {
             "\t\t};\n",
             "/* End PBXAggregateTarget section */\n",
         );
-        let (out, stats) = sort(input);
+        let (out, stats) = sort(input, false);
         let pos_alpha = out.find("AlphaFramework").unwrap();
         let pos_zebra = out.find("ZebraFramework").unwrap();
         assert!(pos_alpha < pos_zebra, "AlphaFramework should sort before ZebraFramework");
@@ -732,7 +733,7 @@ mod tests {
             "\t\t};\n",
             "/* End PBXGroup section */\n",
         );
-        let (out, stats) = sort(input);
+        let (out, stats) = sort(input, false);
         let pos_alpha = out.find("AlphaGroup").unwrap();
         let pos_zebra = out.find("ZebraGroup").unwrap();
         assert!(pos_alpha < pos_zebra, "AlphaGroup should sort before ZebraGroup");
@@ -755,7 +756,7 @@ mod tests {
             "\t\t};\n",
             "/* End PBXTargetDependency section */\n",
         );
-        let (out, stats) = sort(input);
+        let (out, stats) = sort(input, false);
         let pos_alpha = out.find("AlphaApp").unwrap();
         let pos_zebra = out.find("ZebraApp").unwrap();
         assert!(pos_alpha < pos_zebra, "AlphaApp dependency should sort before ZebraApp");

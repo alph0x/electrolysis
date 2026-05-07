@@ -361,3 +361,94 @@ fn combine_commit_passes_on_already_clean_file() {
     let out = run_on(&pbx, &["-c"]);
     assert_success(&out);
 }
+
+/// `merge-driver` must produce a valid pbxproj when all three inputs are identical.
+#[test]
+fn merge_driver_produces_valid_output() {
+    if !require_fixture() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let base = dir.path().join("base.pbxproj");
+    let current = dir.path().join("current.pbxproj");
+    let other = dir.path().join("other.pbxproj");
+
+    fs::copy(fixture_path(), &base).expect("copy base");
+    fs::copy(fixture_path(), &current).expect("copy current");
+    fs::copy(fixture_path(), &other).expect("copy other");
+
+    let out = run(&[
+        "merge-driver",
+        base.to_str().unwrap(),
+        current.to_str().unwrap(),
+        other.to_str().unwrap(),
+    ]);
+    assert_success(&out);
+
+    let content = fs::read_to_string(&current).expect("read merged output");
+
+    // No conflict markers.
+    assert!(!has_conflict_markers(&content), "merge-driver output contains conflict markers");
+
+    // All UUID declarations valid length.
+    assert!(
+        all_uuids_are_valid_length(&content),
+        "merge-driver output contains invalid UUID lengths"
+    );
+
+    // No duplicate UUID declarations.
+    let dups = duplicate_uuids(&content);
+    assert!(dups.is_empty(), "merge-driver output has duplicate UUID declarations: {:?}", dups);
+}
+
+/// `restore` must copy the `.pbxproj.bak` back to the original file.
+#[test]
+fn restore_copies_backup_to_original() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let xcodeproj = dir.path().join("Test.xcodeproj");
+    fs::create_dir(&xcodeproj).unwrap();
+    let pbxproj = xcodeproj.join("project.pbxproj");
+    let backup = xcodeproj.join("project.pbxproj.bak");
+
+    fs::write(&pbxproj, "original content").unwrap();
+    fs::write(&backup, "backup content").unwrap();
+
+    let out = run(&["restore", pbxproj.to_str().unwrap()]);
+    assert_success(&out);
+
+    let restored = fs::read_to_string(&pbxproj).unwrap();
+    assert_eq!(restored, "backup content");
+}
+
+/// `install-git-hooks` must create pre-commit hook and configure merge driver.
+#[test]
+fn install_git_hooks_creates_files_and_config() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+
+    // Initialise a real git repo so `git config` works.
+    let init = std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git init failed");
+    assert!(init.status.success(), "git init failed: {}", String::from_utf8_lossy(&init.stderr));
+
+    // Run from inside the temp repo.
+    let out = std::process::Command::new(bin())
+        .arg("install-git-hooks")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run electrolysis install-git-hooks");
+
+    assert_success(&out);
+
+    let hook = dir.path().join(".git").join("hooks").join("pre-commit");
+    assert!(hook.exists(), "pre-commit hook should be created");
+    let hook_content = fs::read_to_string(&hook).unwrap();
+    assert!(hook_content.contains("electrolysis -c"), "hook should call electrolysis -c");
+
+    let gitattributes = dir.path().join(".gitattributes");
+    assert!(gitattributes.exists(), ".gitattributes should be created");
+    let attr_content = fs::read_to_string(&gitattributes).unwrap();
+    assert!(attr_content.contains("*.pbxproj merge=electrolysis"), ".gitattributes should register merge driver");
+}

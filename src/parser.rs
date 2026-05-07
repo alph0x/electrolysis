@@ -82,7 +82,7 @@ impl PbxProject {
         self.objects.get(uuid).and_then(|o| o.get(field))
     }
 
-    pub fn array_field<'a>(&'a self, uuid: &str, field: &str) -> Option<Vec<String>> {
+    pub fn array_field(&self, uuid: &str, field: &str) -> Option<Vec<String>> {
         self.objects
             .get(uuid)
             .and_then(|o| o.get(field))

@@ -18,7 +18,6 @@
 //! phase entries.  The diff is also serialisable to JSON.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -154,7 +153,7 @@ pub fn build_map(proj: &PbxProject, unique_map: &UniqueMap, project_name: &str) 
     // ── UUID table ────────────────────────────────────────────────────────────
 
     let mut uuid_table: BTreeMap<String, UuidRecord> = BTreeMap::new();
-    for (_old, (typed_path, new_uuid)) in &unique_map.entries {
+    for (typed_path, new_uuid) in unique_map.entries.values() {
         let (isa, _path) = split_typed_path(typed_path);
         uuid_table.insert(
             new_uuid.clone(),
@@ -502,40 +501,7 @@ fn collect_build_phase_files(map: &ProjectMap) -> BTreeSet<String> {
 // ── Timestamp ─────────────────────────────────────────────────────────────────
 
 fn utc_timestamp() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let mut rem = secs;
-    let s = rem % 60; rem /= 60;
-    let min = rem % 60; rem /= 60;
-    let h = rem % 24; rem /= 24;
-
-    let mut year = 1970u32;
-    loop {
-        let dy = if is_leap(year) { 366u64 } else { 365 };
-        if rem < dy { break; }
-        rem -= dy;
-        year += 1;
-    }
-    let months: [u64; 12] = if is_leap(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut month = 0usize;
-    for &dm in &months {
-        if rem < dm { break; }
-        rem -= dm;
-        month += 1;
-    }
-
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month + 1, rem + 1, h, min, s)
-}
-
-fn is_leap(y: u32) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 // ── Default output path ───────────────────────────────────────────────────────

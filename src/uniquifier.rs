@@ -37,6 +37,9 @@ struct ResultMap {
     to_remove: HashSet<String>,
     /// Non-fatal warnings accumulated during traversal.
     warnings: Vec<String>,
+    /// Fast collision detection: new_uuid → typed_path (debug builds only).
+    #[cfg(debug_assertions)]
+    uuid_to_path: HashMap<String, String>,
 }
 
 impl ResultMap {
@@ -55,6 +58,20 @@ impl ResultMap {
         let abs_path = format!("{}/{}", parent_path, path_component);
         let typed_path = format!("{}[{}]", isa, abs_path);
         let new_uuid = md5_uuid(&typed_path);
+
+        #[cfg(debug_assertions)]
+        {
+            if let Some(existing_path) = self.uuid_to_path.get(&new_uuid) {
+                if existing_path != &typed_path {
+                    panic!(
+                        "MD5 collision detected: '{}' and '{}' both map to '{}'",
+                        existing_path, typed_path, new_uuid
+                    );
+                }
+            }
+            self.uuid_to_path.insert(new_uuid.clone(), typed_path.clone());
+        }
+
         self.entries
             .insert(current_uuid.to_string(), (typed_path, new_uuid.clone()));
         new_uuid
