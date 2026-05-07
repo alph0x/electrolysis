@@ -14,6 +14,7 @@ mod merge_driver;
 mod parser;
 mod pipeline;
 mod sanitizer;
+mod scheme_updater;
 mod sorter;
 mod uniquifier;
 
@@ -94,6 +95,13 @@ struct Cli {
     /// Watch the pbxproj file and re-run automatically when it changes.
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     watch: Option<bool>,
+
+    /// Skip rewriting `BlueprintIdentifier` values inside
+    /// `xcshareddata/xcschemes/*.xcscheme`.  By default electrolysis
+    /// propagates UUID renames to schemes so they keep resolving to their
+    /// targets after uniquify.
+    #[arg(long = "no-update-schemes", num_args = 0..=1, default_missing_value = "true")]
+    no_update_schemes: Option<bool>,
 }
 
 #[derive(Subcommand)]
@@ -330,6 +338,7 @@ fn config_from_cli(cli: &Cli, base: Option<Config>) -> Config {
     if let Some(v) = cli.backup { config.backup = v; }
     if let Some(v) = cli.sort_main_group { config.sort_main_group = v; }
     if let Some(v) = cli.watch { config.watch = v; }
+    if let Some(true) = cli.no_update_schemes { config.update_schemes = false; }
     if cli.output.is_some() { config.output = cli.output.clone(); }
     if cli.backup_path.is_some() { config.backup_path = cli.backup_path.clone(); }
     config

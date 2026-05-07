@@ -6,6 +6,11 @@ This document tracks completed and proposed improvements for the project. Items 
 
 ## ✅ Recently Completed
 
+### Scheme propagation (1.4.0)
+- **What:** After uniquify, rewrites `BlueprintIdentifier` values in every `<bundle>.xcodeproj/xcshareddata/xcschemes/*.xcscheme` so schemes keep resolving to their targets. Opt out with `--no-update-schemes` or `update-schemes = false` in TOML.
+- **Why:** Uniquifying without this pass orphaned every shared scheme — Xcode showed "missing target" and tools that resolve targets by `BlueprintIdentifier` (e.g. fastlane's `get_product_bundle_id`) failed at the first step. Real-world impact: a routine `electrolysis` run on a 30+ target project broke 37/37 schemes simultaneously.
+- **Impact:** High — closes the load-bearing gap between deterministic pbxproj UUIDs and the rest of the bundle that references them.
+
 ### Git merge driver (`merge-driver` subcommand)
 - **What:** Custom git merge driver for `project.pbxproj` files. Normalizes base/ours/theirs independently (sanitize → uniquify → sort), then runs `git merge-file --union`.
 - **Why:** Eliminates manual conflict resolution for pbxproj merges. Because all sides use deterministic UUIDs and sorted lists, most changes merge cleanly without conflicts.

@@ -27,6 +27,7 @@ In that environment, `project.pbxproj` becomes a source of constant pain:
 |------|------|--------------|
 | **Sanitize** | Always | Resolves merge-conflict markers, removes duplicate objects and list items, drops orphan section bodies |
 | **Uniquify** | Default | Replaces random Xcode UUIDs with deterministic MD5-based hex UUIDs keyed on `<ProjectName>/<path/to/file>` |
+| **Scheme propagation** | After uniquify | Rewrites `BlueprintIdentifier` values in `xcshareddata/xcschemes/*.xcscheme` so schemes keep resolving to their targets after the UUID rename. Disable with `--no-update-schemes`. |
 | **Sort** | Default | Sorts PBX sections, `files = (…)` and `children = (…)` lists alphabetically by element name, drops duplicate list entries |
 | **Validate** | Always | Re-parses the output before writing to guarantee Xcode can read it |
 | **Map** | `map` subcommand | Emits a JSON snapshot of the project structure: file tree, targets, build phases, UUID table |
@@ -110,6 +111,9 @@ Options:
   -u, --unique          Uniquify UUIDs only (skip sort)
   -s, --sort            Sort only (skip uniquify)
       --sort-main-group Sort the main group's children list too
+      --no-update-schemes
+                        Skip rewriting BlueprintIdentifier in
+                        xcshareddata/xcschemes/*.xcscheme after uniquify
   -c, --combine-commit  Exit non-zero if the file was modified (git pre-commit hook)
       --check           Report whether the file needs changes without modifying it
       --backup          Create a backup before modifying in place
@@ -242,10 +246,10 @@ CLI arguments always override the config file. This is useful for teams that wan
 
 ## How it works
 
-Electrolysis processes the pbxproj in five sequential passes:
+Electrolysis processes the pbxproj in six sequential passes:
 
 ```
-raw text → sanitize → parse → uniquify → sort → validate → write
+raw text → sanitize → parse → uniquify → propagate-to-schemes → sort → validate → write
 ```
 
 1. **Sanitize** (text-level, regex-based)
@@ -259,9 +263,11 @@ raw text → sanitize → parse → uniquify → sort → validate → write
 
 3. **Uniquify** — traverses the project graph from the root object (targets → mainGroup → build phases → files) and builds a deterministic old→new UUID map. Keys are derived from `MD5(<ProjectName>/<path>)`. Objects unreachable from the root are treated as orphans and removed.
 
-4. **Sort** — sorts `files = (…)` and `children = (…)` lists alphabetically by element name, sorts PBXBuildFile and PBXFileReference sections by filename, removes duplicate list entries.
+4. **Scheme propagation** — applies the same old→new UUID map to every `BlueprintIdentifier` inside `<bundle>.xcodeproj/xcshareddata/xcschemes/*.xcscheme`. Without this step, every shared scheme would orphan as soon as the uniquifier renames its target. Schemes already on the new UUIDs are left untouched (idempotent). `xcuserdata` is intentionally skipped — those are per-developer state and typically gitignored. Opt out with `--no-update-schemes`.
 
-5. **Validate** — re-parses the final output to guarantee it is structurally valid before writing to disk.
+5. **Sort** — sorts `files = (…)` and `children = (…)` lists alphabetically by element name, sorts PBXBuildFile and PBXFileReference sections by filename, removes duplicate list entries.
+
+6. **Validate** — re-parses the final output to guarantee it is structurally valid before writing to disk.
 
 ---
 

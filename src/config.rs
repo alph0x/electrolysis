@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Config {
     pub verbose: bool,
     pub quiet: bool,
@@ -16,6 +16,31 @@ pub struct Config {
     pub backup_path: Option<PathBuf>,
     pub sort_main_group: bool,
     pub watch: bool,
+    /// Whether to rewrite `BlueprintIdentifier` values inside
+    /// `xcshareddata/xcschemes/*.xcscheme` so they match the new UUIDs
+    /// after uniquify.  Defaults to `true`; opt out with
+    /// `--no-update-schemes` or `update-schemes = false` in the TOML.
+    pub update_schemes: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            verbose: false,
+            quiet: false,
+            sanitize_only: false,
+            unique_only: false,
+            sort_only: false,
+            combine_commit: false,
+            output: None,
+            check: false,
+            backup: false,
+            backup_path: None,
+            sort_main_group: false,
+            watch: false,
+            update_schemes: true,
+        }
+    }
 }
 
 impl Config {
@@ -50,6 +75,8 @@ pub struct TomlConfig {
     pub backup_path: Option<String>,
     #[serde(default)]
     pub watch: Option<bool>,
+    #[serde(default, rename = "update-schemes")]
+    pub update_schemes: Option<bool>,
 }
 
 impl TomlConfig {
@@ -65,6 +92,7 @@ impl TomlConfig {
         if let Some(v) = self.backup { config.backup = v; }
         if let Some(v) = self.backup_path { config.backup_path = Some(v.into()); }
         if let Some(v) = self.watch { config.watch = v; }
+        if let Some(v) = self.update_schemes { config.update_schemes = v; }
         config
     }
 }
@@ -101,5 +129,28 @@ backup-path = "custom.bak"
         assert!(config.verbose);
         assert!(config.backup);
         assert!(!config.check);
+    }
+
+    #[test]
+    fn default_config_updates_schemes() {
+        // Out-of-the-box electrolysis must propagate UUID renames to
+        // schemes — that is the whole point of the feature.  Existing
+        // users who never set anything must get the fix automatically.
+        assert!(Config::default().update_schemes);
+    }
+
+    #[test]
+    fn toml_update_schemes_false_disables_propagation() {
+        let toml_str = r#"update-schemes = false"#;
+        let cfg: TomlConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.update_schemes, Some(false));
+        assert!(!cfg.into_config().update_schemes);
+    }
+
+    #[test]
+    fn toml_omitting_update_schemes_keeps_default() {
+        let cfg: TomlConfig = toml::from_str(r#"verbose = true"#).unwrap();
+        assert_eq!(cfg.update_schemes, None);
+        assert!(cfg.into_config().update_schemes, "default must remain true");
     }
 }

@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-05-07
+
+### Added
+
+- **Scheme propagation** — after uniquify, electrolysis now rewrites every `BlueprintIdentifier` value inside `<bundle>.xcodeproj/xcshareddata/xcschemes/*.xcscheme` to match the new UUIDs. Previously, uniquifying a project orphaned every shared scheme because their `BlueprintIdentifier` references kept pointing to the old target UUIDs, leaving Xcode and tooling (e.g. fastlane's `get_product_bundle_id`) unable to resolve the targets.
+- **`--no-update-schemes`** — opt out of the scheme propagation pass. Useful if your team manages schemes by hand or from another tool.
+- **`update-schemes` TOML key** — same opt-out at the project level via `.electrolysis.toml`.
+
+### Changed
+
+- **Default behavior is opinionated** — scheme propagation runs by default so existing users get the fix automatically with no flag changes. The pass is fully idempotent and skipped in `--check` mode and in `--sort`-only mode (no UUIDs change).
+- **`xcuserdata` schemes are intentionally untouched** — those are per-developer state and typically gitignored. A future flag may opt them in.
+
+### Internal
+
+- **`FileSystem::list_dir`** added to the trait so the pipeline can enumerate scheme files through the same abstraction the rest of the I/O uses (keeps the in-memory test double drop-in).
+
 ## [1.3.0] - 2026-05-07
 
 ### Added

@@ -9,6 +9,7 @@ use crate::logger::Logger;
 use crate::mapper;
 use crate::parser;
 use crate::sanitizer;
+use crate::scheme_updater;
 use crate::sorter;
 use crate::uniquifier;
 
@@ -18,6 +19,10 @@ pub trait FileSystem {
     fn read_to_string(&self, path: &Path) -> Result<String>;
     fn write_atomic(&self, path: &Path, content: &str) -> Result<()>;
     fn copy(&self, from: &Path, to: &Path) -> Result<()>;
+    /// List the immediate entries of `dir` (non-recursive).  The order is
+    /// implementation-defined; callers that need determinism must sort.
+    /// Returns an error if the directory is missing or unreadable.
+    fn list_dir(&self, dir: &Path) -> Result<Vec<std::path::PathBuf>>;
 }
 
 pub struct RealFileSystem;
@@ -36,6 +41,17 @@ impl FileSystem for RealFileSystem {
         std::fs::copy(from, to)
             .with_context(|| format!("cannot copy {} to {}", from.display(), to.display()))?;
         Ok(())
+    }
+
+    fn list_dir(&self, dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+        let entries = std::fs::read_dir(dir)
+            .with_context(|| format!("cannot read directory {}", dir.display()))?;
+        let mut paths = Vec::new();
+        for entry in entries {
+            let entry = entry.with_context(|| format!("cannot read entry in {}", dir.display()))?;
+            paths.push(entry.path());
+        }
+        Ok(paths)
     }
 }
 
@@ -121,6 +137,8 @@ impl<'a> Pipeline<'a> {
                 removed
             ));
 
+            self.propagate_to_schemes(pbxproj_path, &unique_map.map)?;
+
             let (post_sanitized, post_san_stats) = sanitizer::sanitize(&current);
             current = post_sanitized;
             if self.config.verbose {
@@ -195,6 +213,32 @@ impl<'a> Pipeline<'a> {
     fn validate(&self, content: &str) -> Result<()> {
         self.logger.verbose("validating output…");
         validate_pbxproj(content)
+    }
+
+    fn propagate_to_schemes(
+        &self,
+        pbxproj_path: &Path,
+        map: &std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        if !self.config.update_schemes || self.config.check {
+            return Ok(());
+        }
+        let xcodeproj_dir = pbxproj_path.parent().unwrap_or(pbxproj_path);
+        let stats = scheme_updater::update_shared_schemes(
+            xcodeproj_dir,
+            map,
+            self.fs,
+            self.logger,
+        )?;
+        if stats.files_modified > 0 {
+            self.logger.info(&format!(
+                "{} {} scheme(s) updated ({} BlueprintIdentifier(s) remapped)",
+                "  ✓".green(),
+                stats.files_modified,
+                stats.identifiers_replaced,
+            ));
+        }
+        Ok(())
     }
 
     fn finish(
@@ -542,6 +586,18 @@ pub mod test_double {
             let content = self.read_to_string(from)?;
             self.write_atomic(to, &content)
         }
+
+        fn list_dir(&self, dir: &Path) -> Result<Vec<PathBuf>> {
+            let prefix = dir.to_path_buf();
+            let entries: Vec<PathBuf> = self
+                .files
+                .borrow()
+                .keys()
+                .filter(|p| p.parent() == Some(prefix.as_path()))
+                .cloned()
+                .collect();
+            Ok(entries)
+        }
     }
 }
 
@@ -673,6 +729,93 @@ mod tests {
         assert!(
             fs.get(&backup_path).is_some(),
             "backup should be created"
+        );
+    }
+
+    fn scheme_referencing(uuid: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Scheme>
+   <BuildAction>
+      <BuildableReference
+         BuildableIdentifier = "primary"
+         BlueprintIdentifier = "{uuid}"
+         BuildableName = "Test.app"
+         BlueprintName = "Test"
+         ReferencedContainer = "container:Test.xcodeproj">
+      </BuildableReference>
+   </BuildAction>
+</Scheme>
+"#
+        )
+    }
+
+    #[test]
+    fn pipeline_propagates_uuids_to_shared_schemes_by_default() {
+        let fs = InMemoryFileSystem::new();
+        let pbxproj = PathBuf::from("/Test.xcodeproj/project.pbxproj");
+        let scheme = PathBuf::from("/Test.xcodeproj/xcshareddata/xcschemes/Test.xcscheme");
+        fs.insert(pbxproj.clone(), minimal_pbxproj());
+        fs.insert(
+            scheme.clone(),
+            scheme_referencing("BBBBBBBBBBBBBBBBBBBBBBBB"),
+        );
+
+        let config = Config::default();
+        let logger = NullLogger;
+        let pipeline = Pipeline::new(&config, &fs, &logger);
+        pipeline.process(&pbxproj).unwrap();
+
+        let updated = fs.get(&scheme).unwrap();
+        assert!(
+            !updated.contains("BBBBBBBBBBBBBBBBBBBBBBBB"),
+            "stale BlueprintIdentifier should have been remapped"
+        );
+    }
+
+    #[test]
+    fn pipeline_skips_scheme_update_when_disabled() {
+        let fs = InMemoryFileSystem::new();
+        let pbxproj = PathBuf::from("/Test.xcodeproj/project.pbxproj");
+        let scheme = PathBuf::from("/Test.xcodeproj/xcshareddata/xcschemes/Test.xcscheme");
+        fs.insert(pbxproj.clone(), minimal_pbxproj());
+        let original = scheme_referencing("BBBBBBBBBBBBBBBBBBBBBBBB");
+        fs.insert(scheme.clone(), original.clone());
+
+        let config = Config {
+            update_schemes: false,
+            ..Config::default()
+        };
+        let pipeline = Pipeline::new(&config, &fs, &NullLogger);
+        pipeline.process(&pbxproj).unwrap();
+
+        assert_eq!(
+            fs.get(&scheme).unwrap(),
+            original,
+            "scheme must be untouched when update_schemes=false"
+        );
+    }
+
+    #[test]
+    fn pipeline_check_mode_does_not_modify_schemes() {
+        let fs = InMemoryFileSystem::new();
+        let pbxproj = PathBuf::from("/Test.xcodeproj/project.pbxproj");
+        let scheme = PathBuf::from("/Test.xcodeproj/xcshareddata/xcschemes/Test.xcscheme");
+        fs.insert(pbxproj.clone(), minimal_pbxproj());
+        let original = scheme_referencing("BBBBBBBBBBBBBBBBBBBBBBBB");
+        fs.insert(scheme.clone(), original.clone());
+
+        let config = Config {
+            check: true,
+            ..Config::default()
+        };
+        let pipeline = Pipeline::new(&config, &fs, &NullLogger);
+        let _ = pipeline.process(&pbxproj).unwrap();
+
+        assert_eq!(
+            fs.get(&scheme).unwrap(),
+            original,
+            "scheme must be untouched in check mode"
         );
     }
 
