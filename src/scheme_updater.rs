@@ -29,7 +29,7 @@ static RE_BLUEPRINT: Lazy<Regex> = Lazy::new(|| {
 // Captures one whole `<BuildableReference …>` opening element (attributes
 // span multiple lines, so `(?s)` lets `.` match newlines).
 static RE_BUILDABLE_REF: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?s)<BuildableReference\b[^>]*>"#)
+    Regex::new(r"(?s)<BuildableReference\b[^>]*>")
         .expect("BuildableReference regex must compile")
 });
 
@@ -248,9 +248,10 @@ pub fn repair_shared_schemes(
 fn parse_scheme_attrs(block: &str) -> HashMap<&str, &str> {
     let mut out = HashMap::new();
     for caps in RE_SCHEME_ATTR.captures_iter(block) {
-        let key = caps.get(1).unwrap().as_str();
-        let value = caps.get(2).unwrap().as_str();
-        out.entry(key).or_insert(value);
+        let (Some(key), Some(value)) = (caps.get(1), caps.get(2)) else {
+            continue;
+        };
+        out.entry(key.as_str()).or_insert(value.as_str());
     }
     out
 }

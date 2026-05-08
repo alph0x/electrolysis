@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.3] - 2026-05-08
+
+### Changed
+
+- **Code quality pass** — applied `rust-patterns` and `clean-code-architecture` skills across the entire codebase.
+  - Extracted helper functions to eliminate duplication (`log_level_from_config`, `resolve_path_if_relative`).
+  - Simplified TOML→Config mapping with a DRY `set_if_some!` macro.
+  - Split `run_install_git_hooks` into 3 single-responsibility functions plus an orchestrator.
+  - Removed unnecessary `String` clones in `uniquifier` and `sanitizer`.
+  - Replaced `unwrap()` with safer error handling in `merge_driver` and `scheme_updater`.
+  - Applied clippy pedantic/nursery lints: redundant closures, `Self` keyword, `map_or_else`, inlined format args, needless raw string hashes.
+  - Converted unused-self methods to static functions in `pipeline`.
+
+### Internal
+
+- **New tests** — added 14 unit tests for previously uncovered modules: `logger` (8 tests) and `error` (6 tests).
+- **Total test count: 98** (83 unit + 15 integration); all pass.
+- **Verified idempotency** on the 22MB real-world fixture (`test-subject.xcodeproj.bak`).
+
 ## [1.4.2] - 2026-05-07
 
 ### Fixed

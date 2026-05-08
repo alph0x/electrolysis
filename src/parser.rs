@@ -19,19 +19,19 @@ use crate::error::ElectrolysisError;
 #[derive(Debug, Clone)]
 pub enum PbxValue {
     Str(String),
-    Dict(IndexMap<String, PbxValue>),
-    Array(Vec<PbxValue>),
+    Dict(IndexMap<String, Self>),
+    Array(Vec<Self>),
 }
 
 impl PbxValue {
     pub fn as_str(&self) -> Option<&str> {
-        match self { PbxValue::Str(s) => Some(s), _ => None }
+        match self { Self::Str(s) => Some(s), _ => None }
     }
     pub fn as_dict(&self) -> Option<&IndexMap<String, PbxValue>> {
-        match self { PbxValue::Dict(d) => Some(d), _ => None }
+        match self { Self::Dict(d) => Some(d), _ => None }
     }
     pub fn as_array(&self) -> Option<&[PbxValue]> {
-        match self { PbxValue::Array(a) => Some(a), _ => None }
+        match self { Self::Array(a) => Some(a), _ => None }
     }
     /// String representation for dict/str, None for array.
     #[allow(dead_code)]
@@ -89,7 +89,7 @@ impl PbxProject {
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .filter_map(|v| v.as_str().map(str::to_string))
                     .collect()
             })
     }
@@ -211,7 +211,7 @@ impl<'a> PbxParser<'a> {
             )));
         }
         std::str::from_utf8(&self.src[start..self.pos])
-            .map(|s| s.to_string())
+            .map(str::to_string)
             .map_err(|_| self.err("invalid UTF-8 in unquoted string"))
     }
 

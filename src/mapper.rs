@@ -210,13 +210,11 @@ fn resolve_new_uuid(unique_map: &UniqueMap, old_uuid: &str) -> String {
 
 /// Split `"ISA[path]"` → `("ISA", "path")`.
 fn split_typed_path(typed: &str) -> (&str, &str) {
-    if let Some(bracket) = typed.find('[') {
+    typed.find('[').map_or((typed, ""), |bracket| {
         let isa = &typed[..bracket];
         let path = typed[bracket + 1..].trim_end_matches(']');
         (isa, path)
-    } else {
-        (typed, "")
-    }
+    })
 }
 
 fn project_configurations(proj: &PbxProject, root_uuid: &str) -> Vec<String> {
@@ -227,7 +225,7 @@ fn project_configurations(proj: &PbxProject, root_uuid: &str) -> Vec<String> {
     let config_uuids = proj.array_field(&bcl, "buildConfigurations").unwrap_or_default();
     config_uuids
         .iter()
-        .filter_map(|u| proj.str_field(u, "name").map(|s| s.to_string()))
+        .filter_map(|u| proj.str_field(u, "name").map(str::to_string))
         .collect()
 }
 
@@ -242,13 +240,13 @@ fn build_file_node(proj: &PbxProject, uuid: &str, um: &UniqueMap) -> Option<File
         .unwrap_or("(unnamed)")
         .to_string();
 
-    let path = obj.get("path").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let source_tree = obj.get("sourceTree").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let path = obj.get("path").and_then(|v| v.as_str()).map(str::to_string);
+    let source_tree = obj.get("sourceTree").and_then(|v| v.as_str()).map(str::to_string);
     let file_type = obj
         .get("lastKnownFileType")
         .or_else(|| obj.get("explicitFileType"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(str::to_string);
 
     let child_uuids = proj.array_field(uuid, "children").unwrap_or_default();
     let children: Vec<FileNode> = child_uuids
@@ -276,7 +274,7 @@ fn build_target_map(proj: &PbxProject, target_uuid: &str, um: &UniqueMap) -> Opt
         .and_then(|v| v.as_str())
         .unwrap_or(&name)
         .to_string();
-    let product_type = obj.get("productType").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let product_type = obj.get("productType").and_then(|v| v.as_str()).map(str::to_string);
 
     let configurations = {
         let bcl = obj
@@ -287,7 +285,7 @@ fn build_target_map(proj: &PbxProject, target_uuid: &str, um: &UniqueMap) -> Opt
         let cfg_uuids = proj.array_field(&bcl, "buildConfigurations").unwrap_or_default();
         cfg_uuids
             .iter()
-            .filter_map(|u| proj.str_field(u, "name").map(|s| s.to_string()))
+            .filter_map(|u| proj.str_field(u, "name").map(str::to_string))
             .collect()
     };
 
@@ -299,7 +297,7 @@ fn build_target_map(proj: &PbxProject, target_uuid: &str, um: &UniqueMap) -> Opt
                 // Dependency → target → name
                 proj.str_field(dep_uuid, "target")
                     .and_then(|t| proj.str_field(t, "name"))
-                    .map(|s| s.to_string())
+                    .map(str::to_string)
             })
             .collect()
     };
@@ -324,7 +322,7 @@ fn build_target_map(proj: &PbxProject, target_uuid: &str, um: &UniqueMap) -> Opt
 fn build_phase_map(proj: &PbxProject, phase_uuid: &str, um: &UniqueMap) -> Option<BuildPhaseMap> {
     let obj = proj.get_object(phase_uuid)?;
     let phase_type = obj.get("isa").and_then(|v| v.as_str()).unwrap_or("PBXBuildPhase").to_string();
-    let name = obj.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let name = obj.get("name").and_then(|v| v.as_str()).map(str::to_string);
 
     let file_uuids = proj.array_field(phase_uuid, "files").unwrap_or_default();
     let files: Vec<BuildFileMap> = file_uuids

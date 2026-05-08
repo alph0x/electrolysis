@@ -138,8 +138,7 @@ impl<'a> Uniquifier<'a> {
         // SPM package references at the project level.
         let pkg_refs = self.proj.array_field(root_uuid, "packageReferences").unwrap_or_default();
         for pkg in &pkg_refs {
-            let pkg = pkg.clone();
-            self.unique_package_ref(root_uuid, &pkg);
+            self.unique_package_ref(root_uuid, pkg);
         }
 
         // Pre-register all targets so cross-references resolve.
@@ -148,15 +147,14 @@ impl<'a> Uniquifier<'a> {
             self.pre_register_target(root_uuid, t);
         }
         for t in &targets {
-            let t = t.clone();
-            self.unique_target(&t);
+            self.unique_target(t);
         }
 
         // Build final old→new map.
-        let mut map: HashMap<String, String> = HashMap::with_capacity(self.result.entries.len());
-        for (old, (_, new)) in &self.result.entries {
-            map.insert(old.clone(), new.clone());
-        }
+        let map: HashMap<String, String> = self.result.entries
+            .iter()
+            .map(|(old, (_, new))| (old.clone(), new.clone()))
+            .collect();
 
         let entries = self.result.entries;
 
@@ -256,22 +254,20 @@ impl<'a> Uniquifier<'a> {
 
         // Build phases.
         let phases = self.proj.array_field(target_uuid, "buildPhases").unwrap_or_default();
-        for phase in phases {
-            let phase = phase.clone();
-            self.unique_build_phase(target_uuid, &phase);
+        for phase in &phases {
+            self.unique_build_phase(target_uuid, phase);
         }
 
         // Build rules.
         let rules = self.proj.array_field(target_uuid, "buildRules").unwrap_or_default();
-        for rule in rules {
-            self.unique_build_rule(target_uuid, &rule);
+        for rule in &rules {
+            self.unique_build_rule(target_uuid, rule);
         }
 
         // SPM product dependencies.
         let pkg_deps = self.proj.array_field(target_uuid, "packageProductDependencies").unwrap_or_default();
-        for dep in pkg_deps {
-            let dep = dep.clone();
-            self.unique_package_product_dep(target_uuid, &dep);
+        for dep in &pkg_deps {
+            self.unique_package_product_dep(target_uuid, dep);
         }
     }
 
@@ -381,7 +377,7 @@ impl<'a> Uniquifier<'a> {
             .get("fileRef")
             .or_else(|| obj.get("productRef"))
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(str::to_string);
 
         let ref_uuid = match ref_uuid {
             Some(r) => r,
@@ -395,8 +391,7 @@ impl<'a> Uniquifier<'a> {
         // registered yet, register it now (it may not appear in any
         // `packageProductDependencies` list when using local packages).
         if has_product_ref && !self.result.entries.contains_key(&ref_uuid) {
-            let dep_uuid = ref_uuid.clone();
-            self.unique_package_product_dep(parent_uuid, &dep_uuid);
+            self.unique_package_product_dep(parent_uuid, &ref_uuid);
         }
 
         let path_component = if let Some(abs) = self.result.abs_path(&ref_uuid) {
@@ -449,8 +444,7 @@ impl<'a> Uniquifier<'a> {
         if let Some(pkg_uuid) = self.proj.str_field(dep_uuid, "package") {
             let pkg_uuid = pkg_uuid.to_string();
             if !self.result.entries.contains_key(&pkg_uuid) {
-                let root_uuid = self.proj.root_object.clone();
-                self.unique_package_ref(&root_uuid, &pkg_uuid);
+                self.unique_package_ref(&self.proj.root_object, &pkg_uuid);
             }
         }
     }

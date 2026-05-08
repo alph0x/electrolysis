@@ -322,7 +322,7 @@ fn remove_orphan_sections(input: &str, stats: &mut SanitizeStats) -> String {
                 continue;
             }
         }
-        if let Some(ref name) = skip_section.clone() {
+        if let Some(ref name) = skip_section {
             // Keep looking until we find the End (shouldn't exist, but be safe).
             if let Some(cap) = RE_END_SECTION.captures(line) {
                 if &cap[1] == name {

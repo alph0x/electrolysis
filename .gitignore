@@ -5,3 +5,10 @@
 # Claude
 .claude/
 CONTEXT.md
+
+# autoskills
+.agents/
+skills-lock.json
+
+# Cline
+.cline/

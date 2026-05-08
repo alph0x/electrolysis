@@ -142,9 +142,9 @@ fn union_merge_normalized(
             "merge-file",
             "--union",
             "-p",
-            tmp_current.path().to_str().unwrap(),
-            tmp_base.path().to_str().unwrap(),
-            tmp_other.path().to_str().unwrap(),
+            &tmp_current.path().to_string_lossy(),
+            &tmp_base.path().to_string_lossy(),
+            &tmp_other.path().to_string_lossy(),
         ])
         .output()
         .context("failed to run `git merge-file` — is git installed?")?;

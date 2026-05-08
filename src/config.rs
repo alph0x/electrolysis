@@ -82,17 +82,25 @@ pub struct TomlConfig {
 impl TomlConfig {
     pub fn into_config(self) -> Config {
         let mut config = Config::default();
-        if let Some(v) = self.verbose { config.verbose = v; }
-        if let Some(v) = self.quiet { config.quiet = v; }
-        if let Some(v) = self.sanitize_only { config.sanitize_only = v; }
-        if let Some(v) = self.unique_only { config.unique_only = v; }
-        if let Some(v) = self.sort_only { config.sort_only = v; }
-        if let Some(v) = self.combine_commit { config.combine_commit = v; }
-        if let Some(v) = self.sort_main_group { config.sort_main_group = v; }
-        if let Some(v) = self.backup { config.backup = v; }
-        if let Some(v) = self.backup_path { config.backup_path = Some(v.into()); }
-        if let Some(v) = self.watch { config.watch = v; }
-        if let Some(v) = self.update_schemes { config.update_schemes = v; }
+        macro_rules! set_if_some {
+            ($field:ident) => {
+                if let Some(v) = self.$field { config.$field = v; }
+            };
+            ($field:ident => $expr:expr) => {
+                if let Some(v) = self.$field { config.$field = $expr(v); }
+            };
+        }
+        set_if_some!(verbose);
+        set_if_some!(quiet);
+        set_if_some!(sanitize_only);
+        set_if_some!(unique_only);
+        set_if_some!(sort_only);
+        set_if_some!(combine_commit);
+        set_if_some!(sort_main_group);
+        set_if_some!(backup);
+        set_if_some!(backup_path => |v: String| Some(v.into()));
+        set_if_some!(watch);
+        set_if_some!(update_schemes);
         config
     }
 }

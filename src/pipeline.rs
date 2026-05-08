@@ -109,7 +109,7 @@ impl<'a> Pipeline<'a> {
 
             let proj = parser::parse_project(&current).map_err(|e| {
                 if self.config.verbose {
-                    self.print_parse_context(&e, &current);
+                    Self::print_parse_context(&e, &current);
                 }
                 anyhow::Error::from(e)
                     .context("failed to parse — run --sanitize-only first if the file is corrupt")
@@ -312,8 +312,7 @@ impl<'a> Pipeline<'a> {
                 .config
                 .backup_path
                 .as_deref()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| dest.with_extension("pbxproj.bak"));
+                .map_or_else(|| dest.with_extension("pbxproj.bak"), |p| p.to_path_buf());
             self.fs
                 .copy(pbxproj_path, &backup_path)
                 .with_context(|| format!("cannot create backup {}", backup_path.display()))?;
@@ -368,7 +367,7 @@ impl<'a> Pipeline<'a> {
         }
     }
 
-    fn print_parse_context(&self, e: &ElectrolysisError, current: &str) {
+    fn print_parse_context(e: &ElectrolysisError, current: &str) {
         if let ElectrolysisError::Parse { line, .. } = e {
             let ctx = 5usize;
             let start = line.saturating_sub(ctx);
@@ -412,8 +411,7 @@ impl<'a> Pipeline<'a> {
 
         let xcodeproj_dir = pbxproj_path.parent().unwrap_or(pbxproj_path);
         let out_path = output
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| mapper::default_map_path(xcodeproj_dir));
+            .map_or_else(|| mapper::default_map_path(xcodeproj_dir), |p| p.to_path_buf());
 
         let json = serde_json::to_string_pretty(&project_map)
             .context("failed to serialise project map")?;
@@ -474,7 +472,7 @@ impl<'a> Pipeline<'a> {
                 ));
             }
             None if color => {
-                self.print_colored_diff(&diff);
+                Self::print_colored_diff(&diff);
             }
             None => {
                 println!("{}", diff_json);
@@ -486,7 +484,7 @@ impl<'a> Pipeline<'a> {
         Ok(diff.status)
     }
 
-    fn print_colored_diff(&self, diff: &mapper::MapDiff) {
+    fn print_colored_diff(diff: &mapper::MapDiff) {
         if diff.status == mapper::DiffStatus::Identical {
             println!("{}", "✓ identical — no structural changes".green());
             return;
